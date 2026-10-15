@@ -266,6 +266,35 @@ void toggle_switch(gfx::DrawList & l, float right, float cy, bool on) {
     l.circle(on ? r.x + r.w - 18 : r.x + 18, cy, 14, on ? kInk : kInk2);
 }
 
+// Greedy word wrap to `width`; a word longer than a line is cut.
+std::vector<std::string> wrap(const ui::FontRef & f, const std::string & text, float size, float width) {
+    std::vector<std::string> lines;
+    std::string line;
+    size_t at = 0;
+    while (at < text.size()) {
+        size_t end = text.find(' ', at);
+        if (end == std::string::npos) {
+            end = text.size();
+        }
+        const std::string word = text.substr(at, end - at);
+        const std::string next = line.empty() ? word : line + " " + word;
+        if (!line.empty() && f.measure(next, size) > width) {
+            lines.push_back(line);
+            line = word;
+        } else {
+            line = next;
+        }
+        at = end + 1;
+    }
+    if (!line.empty()) {
+        lines.push_back(line);
+    }
+    for (auto & l : lines) {
+        l = f.font->fit(l, size, width);
+    }
+    return lines;
+}
+
 int first_visible(int cursor, int rows) {
     return std::clamp(cursor - kVisibleRows / 2, 0, std::max(0, rows - kVisibleRows));
 }
@@ -1094,45 +1123,73 @@ void Dashboard::draw_home(gfx::DrawList & l) const {
         meter(l, kLeft + 460, my + 16, 400, live_.ctx > 0 ? (float) live_.ctx_used / (float) live_.ctx : 0, kInk.with_alpha(0.8f));
     }
 
-    // Right: where the model is reached. A single panel, as a car gives the map.
+    // Right: where the model is reached, and what the network asks of it, as
+    // it happens. A single panel, as a car gives the map.
     const Rect p{ 1056, 196, kRight - 1056, 728 };
     l.rounded_rect(p, 24, kSurface);
-    const float x = p.x + 56;
-    put(l, f.regular, "On your network", x, p.y + 76, 24, kInk2);
+    const float x = p.x + 56, w = p.w - 112;
+    put(l, f.regular, "On your network", x, p.y + 70, 22, kInk2);
     const std::string url = live_.address.empty() ? std::string("Not connected") : "http://" + live_.address;
-    put(l, f.regular, f.regular.font->fit(url, 44, p.w - 112), x, p.y + 136, 44, live_.address.empty() ? kInk3 : kInk);
-    const bool serving = loaded && (live_.state == ServerState::ready || live_.state == ServerState::generating);
+    put(l, f.regular, f.regular.font->fit(url, 40, w), x, p.y + 124, 40, live_.address.empty() ? kInk3 : kInk);
     put(l, f.regular,
-         !loaded ? "Load a model and it answers here"
-         : decision ? "Answers the TypeSafe decision API"
-                    : "Answers the OpenAI and Anthropic APIs, and a chat page",
-         x, p.y + 184, 24, kInk2);
+        !loaded ? "Load a model and it answers here"
+        : decision ? "TypeSafe decisions at /v1/systemone"
+                   : "OpenAI, Anthropic and a chat page",
+        x, p.y + 162, 22, kInk3);
+    l.line(x, p.y + 196, x + w, p.y + 196, 1.5f, kHair);
 
-    struct Ep { const char * method; const char * path; };
-    const Ep chat[] = { { "POST", "/v1/chat/completions" }, { "POST", "/v1/messages" }, { "GET", "/v1/models" } };
-    const Ep dec[] = { { "POST", "/v1/systemone" }, { "GET", "/v1/models" } };
-    const Ep * eps = decision ? dec : chat;
-    const int n = decision ? 2 : 3;
-    for (int i = 0; i < n; ++i) {
-        const float y = p.y + 268 + 52.0f * (float) i;
-        const Color c = serving ? kInk : kInk3;
-        put(l, f.mono, eps[i].method, x, y, 24, kInk3);
-        put(l, f.mono, eps[i].path, x + 96, y, 24, c);
+    // The latest requests, newest first: who asked, what, and the answer as it arrives.
+    float y = p.y + 240;
+    const float bottom = p.y + p.h - 72;
+    if (live_.activity.empty()) {
+        put(l, f.regular, "Requests from other devices appear here as they arrive.", x, y + 8, 22, kInk3);
+    }
+    for (auto it = live_.activity.rbegin(); it != live_.activity.rend() && y < bottom - 90; ++it) {
+        const Exchange & e = *it;
+        const bool running = e.status == 0;
+        const bool fault = e.status >= 400;
+        put(l, f.regular, e.client + "    " + e.path, x, y, 19, kInk3);
+        if (running) {
+            const float tw = put(l, f.regular, "Answering", x + w, y, 19, kInk2, gfx::Align::right);
+            l.circle(x + w - tw - 14, y - 7, 5, kBlue.with_alpha(0.55f + 0.45f * std::sin(clock_ * 6.0f)));
+        } else {
+            put(l, f.regular, fault ? format("Error %.0f", (double) e.status) : format(e.seconds < 10 ? "%.1f s" : "%.0f s", e.seconds),
+                x + w, y, 19, fault ? kRed : kInk3, gfx::Align::right);
+        }
+        y += 34;
+        put(l, f.regular, f.regular.font->fit(e.asked.empty() ? std::string(kDash) : e.asked, 22, w), x, y, 22, kInk2);
+        y += 34;
+        // While it streams, the answer's last lines, so it reads as it is
+        // written; once done, its first ones.
+        std::vector<std::string> lines = wrap(f.regular, e.answered, 22, w);
+        const int keep = it == live_.activity.rbegin() ? 3 : 1;
+        if ((int) lines.size() > keep) {
+            if (running) {
+                lines.erase(lines.begin(), lines.end() - keep);
+            } else {
+                lines.resize((size_t) keep);
+                lines.back() = f.regular.font->fit(lines.back() + " \xE2\x80\xA6", 22, w);
+            }
+        }
+        if (lines.empty()) {
+            lines.push_back(running ? "" : kDash);
+        }
+        for (const auto & line : lines) {
+            if (y > bottom) {
+                break;
+            }
+            put(l, f.regular, line, x, y, 22, fault ? kRed : kInk);
+            y += 31;
+        }
+        y += 30;
     }
 
     // What it has done since it started, like a trip meter.
-    l.line(x, p.y + 470, p.x + p.w - 56, p.y + 470, 1.5f, kHair);
-    struct Fig { std::string value; const char * label; };
-    const Fig figs[] = { { thousands(live_.requests), "requests" },
-                         { thousands(live_.prompt_tokens), "tokens in" },
-                         { thousands(live_.tokens), "tokens out" } };
-    const int figures = decision ? 2 : 3;
-    for (int i = 0; i < figures; ++i) {
-        const float fx = x + 230.0f * (float) i;
-        put(l, f.display, figs[i].value, fx - 2, p.y + 572, 60, loaded ? kInk : kInk3);
-        put(l, f.regular, figs[i].label, fx, p.y + 614, 22, kInk3);
+    std::string trip = thousands(live_.served) + " requests    " + thousands(live_.prompt_tokens) + " tokens in";
+    if (!decision) {
+        trip += "    " + thousands(live_.tokens) + " out";
     }
-    put(l, f.regular, decision || !loaded ? "" : "Open the address in a browser to chat", x, p.y + 680, 22, kInk3);
+    put(l, f.regular, trip, x, p.y + p.h - 40, 20, kInk3);
 }
 
 // ---- drawing: Models ------------------------------------------------------------------

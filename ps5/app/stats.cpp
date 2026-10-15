@@ -257,6 +257,55 @@ void StatsCollector::set_models(const std::vector<ModelRow> & rows) {
     live_.models = rows;
 }
 
+namespace {
+
+double steady_s() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+}  // namespace
+
+void StatsCollector::activity_begin(int id, std::string client, std::string path, std::string asked) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Exchange e;
+    e.id = id;
+    e.client = std::move(client);
+    e.path = std::move(path);
+    e.asked = std::move(asked);
+    e.started = steady_s();
+    live_.activity.push_back(std::move(e));
+    if (live_.activity.size() > 6) {
+        live_.activity.erase(live_.activity.begin());
+    }
+}
+
+void StatsCollector::activity_text(int id, const std::string & text) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto & e : live_.activity) {
+        if (e.id == id) {
+            e.answered += text;
+            if (e.answered.size() > 4000) {  // the screen shows the end of it
+                size_t cut = e.answered.size() - 3000;
+                while (cut < e.answered.size() && ((unsigned char) e.answered[cut] & 0xC0) == 0x80) {
+                    ++cut;
+                }
+                e.answered.erase(0, cut);
+            }
+        }
+    }
+}
+
+void StatsCollector::activity_end(int id, int status) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto & e : live_.activity) {
+        if (e.id == id) {
+            live_.served += status < 400;
+            e.status = status;
+            e.seconds = steady_s() - e.started;
+        }
+    }
+}
+
 void StatsCollector::set_scratch(double gib) {
     std::lock_guard<std::mutex> lock(mutex_);
     live_.scratch_gib = gib;

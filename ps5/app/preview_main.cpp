@@ -89,6 +89,7 @@ ps5lm::Live sample(float seconds, bool generating) {
     L.tokens      = 4182;
     L.prompt_tokens = 9120;
     L.requests    = 14;
+    L.served      = 14;
     L.ctx_used    = 2318;
     L.prompt_tps  = 45.4f;
     for (int i = 0; i < 120; ++i) {
@@ -99,6 +100,24 @@ ps5lm::Live sample(float seconds, bool generating) {
         L.cpu_history.push_back(on ? 0.11f + 0.03f * std::sin(i * 0.5f) : 0.02f);
         L.temp_history.push_back(on ? 60.0f + 2.0f * std::sin(i * 0.2f) : 52.0f);
         L.power_history.push_back(on ? 85.0f + 1.5f * std::sin(i * 0.4f) : 23.0f);
+    }
+    {
+        // Requests from the network: two answered, the newest still streaming.
+        ps5lm::Exchange a;
+        a.id = 12; a.client = "192.168.1.31"; a.path = "/v1/messages"; a.status = 200; a.seconds = 12.8;
+        a.asked = "Rename the loop variable in parse_args to something clearer and explain why";
+        a.answered = "Renamed i to arg_index: it says what the loop walks, and the next reader does not have to look up what i counts.";
+        L.activity.push_back(a);
+        a.id = 13; a.client = "192.168.1.24"; a.path = "/v1/chat/completions"; a.status = 200; a.seconds = 3.4;
+        a.asked = "Write a haiku about a console that runs a language model";
+        a.answered = "Fans hum through the night, a console dreams in tokens, words bloom on the TV.";
+        L.activity.push_back(a);
+        a.id = 14; a.client = "192.168.1.24"; a.path = "/v1/chat/completions"; a.status = generating ? 0 : 200; a.seconds = 9.1;
+        a.asked = "How does the PS5's GPU run llama.cpp?";
+        a.answered = "Through Vulkan. Mihawk-99's RADV port gives the console a full Vulkan 1.4 driver, so llama.cpp's own Vulkan "
+                     "backend runs unchanged: every matrix product becomes a compute shader that ACO compiles on the console, and "
+                     "the weights sit in the 12 GB the GPU and CPU share";
+        L.activity.push_back(a);
     }
     L.gen_tps  = generating ? 20.7f : 0.0f;
     L.gpu_busy = generating ? 0.94f : 0.02f;
@@ -166,6 +185,14 @@ ps5lm::Live sample(float seconds, bool generating) {
         L.prompt_tokens = 88412;
         L.requests = 131;
         L.free_gib = 8.6;
+        L.activity.clear();
+        ps5lm::Exchange a;
+        a.id = 130; a.client = "192.168.1.40"; a.path = "/v1/systemone"; a.status = 200; a.seconds = 0.3;
+        a.asked = "3 questions: {\"from\": \"promo@cheap-meds.biz\", \"subject\": \"URGENT: you won a free iPhone!!!\"}";
+        a.answered = "spam yes 1.00, intent sell, urgency 1.02";
+        L.activity.push_back(a);
+        a.id = 131; a.asked = "7 questions, 1 image"; a.answered = "text no 0.01, color black, ad no 0.01, people no 0.00, mood 1.00";
+        a.seconds = 2.9; L.activity.push_back(a);
     }
     if (g_empty) {
         L.state = ps5lm::ServerState::no_model;

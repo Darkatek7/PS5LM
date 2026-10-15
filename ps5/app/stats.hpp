@@ -25,6 +25,18 @@ struct Drive {
     double      free = 0, total = 0;  // GiB; total 0 when unknown (no ps5-exporter)
 };
 
+// A request another device made, and what was answered, for the Home page.
+struct Exchange {
+    int         id = 0;
+    std::string client;     // "192.168.8.12"
+    std::string path;       // "/v1/chat/completions"
+    std::string asked;      // the last user message, a decision's state, or the prompt
+    std::string answered;   // the text answered so far
+    int         status = 0; // the HTTP status once done, 0 while it runs
+    double      seconds = 0;  // how long it took, once done
+    double      started = 0;  // steady clock, seconds
+};
+
 enum class ServerState : uint8_t { loading, ready, generating, failed, no_model };
 
 struct ModelRow {
@@ -102,6 +114,8 @@ struct Live {
     uint32_t ctx_used  = 0;  // in the running slot
 
     std::vector<ModelRow> models;
+    std::vector<Exchange> activity;  // the latest requests, oldest first
+    uint64_t served = 0;             // requests answered without an error
 };
 
 // The sampling thread. Fill the static parts (model, address) with set_*;
@@ -114,6 +128,10 @@ class StatsCollector {
     void set_models(const std::vector<ModelRow> & rows);
     void set_state(ServerState s);
     void set_scratch(double gib);
+    // From llama-server's HTTP threads, through activity.cpp.
+    void activity_begin(int id, std::string client, std::string path, std::string asked);
+    void activity_text(int id, const std::string & text);
+    void activity_end(int id, int status);
 
   private:
     void run();
@@ -135,6 +153,8 @@ std::vector<Drive> drives_from_metrics(const std::string & text);
 std::string drive_name(const std::string & path);
 
 bool send_payload(const char * path, int port);
+// Where llama-server's request hooks (activity.cpp) report.
+void set_activity_sink(StatsCollector * stats);
 
 std::string local_address();
 

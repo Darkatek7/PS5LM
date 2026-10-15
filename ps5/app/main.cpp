@@ -600,6 +600,7 @@ int main(int, char **) {
 
     StatsCollector stats;
     stats.start(kPort);
+    set_activity_sink(&stats);  // llama-server's request hooks (patches/0007) report here
     models.settings = load_settings(kSettings);
     models.scan(stats);
 

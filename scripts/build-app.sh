@@ -20,7 +20,8 @@ tool="$vk/build/host/ps5-native-tool"
 llama="$root/third_party/llama.cpp"
 out="$root/build/app-ps5"
 headers="$root/.deps/ps5-vk-headers"
-glsdk=${PS5_OPENGL_SDK:-$root/.deps/ps5-opengl/ps5-opengl-sdk-1.0.0/sdk}
+# ps5-opengl comes pinned and sha256-checked through the submodule's own script.
+glsdk=${PS5_OPENGL_SDK:-$(bash "$root/third_party/ps5-homebrew-ui/tools/fetch-opengl-sdk.sh")}
 sce_sys="$root/ps5/app/sce_sys"
 param="$sce_sys/param.json"
 
@@ -63,6 +64,7 @@ flags="-DSUBPROCESS_HAVE_CWD=0 -I$headers/include"
 # llama.cpp throws, catches and uses dynamic_cast; the PS5 target turns
 # exceptions and RTTI off by default.
 cxxflags="$flags -fexceptions -fcxx-exceptions -frtti"
+mkdir -p "$out"
 cmake -S "$llama" -B "$out/llama" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$root/ps5/app/toolchain.cmake" \
     -DCMAKE_BUILD_TYPE=Release \
@@ -83,7 +85,7 @@ obj="$out/obj"
 mkdir -p "$obj" "$out/stubs"
 cxx() { "$root/ps5/app/ps5cxx" -std=c++17 -O2 -ffunction-sections -fdata-sections "$@"; }
 cxx -std=c++20 -fexceptions -fcxx-exceptions -frtti -I "$headers/include" -I "$llama/ggml/include" -I "$root/third_party/ps5-homebrew-ui/src" \
-    -I "${PS5_OPENGL_SDK:-$root/.deps/ps5-opengl/ps5-opengl-sdk-1.0.0/sdk}/include" -DGL_GLEXT_PROTOTYPES=1 \
+    -I "$glsdk/include" -DGL_GLEXT_PROTOTYPES=1 \
     -c "$root/ps5/app/main.cpp" -o "$obj/main.o"
 cxx -fexceptions -fcxx-exceptions -c "$root/ps5/app/model_plan.cpp" -o "$obj/model_plan.o"
 cxx -std=c++20 -fexceptions -fcxx-exceptions -I "$llama/vendor" -c "$root/ps5/app/settings.cpp" -o "$obj/settings.o"

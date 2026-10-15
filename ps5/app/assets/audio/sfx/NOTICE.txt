@@ -1,0 +1,3 @@
+Interface sounds from PocketVibe (MIT, Copyright (c) 2026 Mert Cobanov), made by its
+tools/sfx/make_sfx.py: procedural glass-mallet tones, all in D major.
+Converted to 48 kHz mono and named after ps5-homebrew-ui's cues.

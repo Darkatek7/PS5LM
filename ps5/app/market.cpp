@@ -250,7 +250,7 @@ const char * state_name(DownloadState s) {
 
 std::string part_path(const Download & d) {
     const size_t slash = d.file.find_last_of('/');
-    return d.dir + "/" + d.file.substr(slash == std::string::npos ? 0 : slash + 1) + ".part";
+    return d.dir + "/" + (d.save_as.empty() ? d.file.substr(slash == std::string::npos ? 0 : slash + 1) : d.save_as) + ".part";
 }
 
 uint64_t file_size(const std::string & path) {
@@ -264,7 +264,7 @@ void Market::save_queue() {
     nlohmann::json j = nlohmann::json::array();
     for (const auto & d : view_.downloads) {
         j.push_back({ { "repo", d.repo }, { "file", d.file }, { "sha256", d.sha256 }, { "dir", d.dir }, { "bytes", d.bytes },
-                      { "state", state_name(d.state) }, { "note", d.note }, { "resume", d.resume } });
+                      { "state", state_name(d.state) }, { "note", d.note }, { "resume", d.resume }, { "save_as", d.save_as } });
     }
     std::ofstream(kQueue) << j.dump(1) << "\n";
 }
@@ -284,6 +284,7 @@ void Market::load_queue() {
         d.dir = e.value("dir", std::string());
         d.bytes = e.value("bytes", (uint64_t) 0);
         d.note = e.value("note", std::string());
+        d.save_as = e.value("save_as", std::string());
         const std::string st = e.value("state", std::string());
         // Running when the app stopped: carry on.
         d.state = st == "paused" ? DownloadState::paused : st == "failed" ? DownloadState::failed

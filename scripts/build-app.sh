@@ -209,13 +209,16 @@ if [ ! -f "$sce_sys/pic0.dds" ] || [ "$sce_sys/source/background.png" -nt "$sce_
 fi
 cp "$sce_sys/icon0.png" "$sce_sys/pic0.dds" "$sce_sys/pic1.dds" "$app/sce_sys/"
 cp "$vk/runtime/libc.prx" "$app/sce_module/libc.prx"
-# The dashboard's fonts and interface sounds (ps5-homebrew-ui's, with their licences).
+# The dashboard's fonts and interface sounds, with their licences.
 mkdir -p "$app/assets/fonts" "$app/assets/audio"
-for font in inter-regular inter-semibold montserrat-medium dejavu-sans-mono; do
-    cp "$root/third_party/ps5-homebrew-ui/assets/fonts/$font.huifont" "$app/assets/fonts/"
-done
-cp "$root/third_party/ps5-homebrew-ui/assets/fonts/"*LICENSE* "$app/assets/fonts/"
-cp -r "$root/third_party/ps5-homebrew-ui/assets/audio/sfx" "$app/assets/audio/"
+# Manrope for the screen (scripts/bake-fonts.sh), the kit's DejaVu Sans Mono for logs and code.
+cp "$root/ps5/app/assets/fonts/"manrope-* "$app/assets/fonts/"
+cp "$root/third_party/ps5-homebrew-ui/assets/fonts/"{dejavu-sans-mono.huifont,DejaVu-LICENSE.txt} "$app/assets/fonts/"
+# The interface sounds are PocketVibe's (ps5/app/assets/audio/sfx).
+# shortcut: they take the kit's default set name (glass), so no kit change picks
+# them; give them a set of their own if the kit ever lets an app add one.
+mkdir -p "$app/assets/audio/sfx/glass"
+cp "$root/ps5/app/assets/audio/sfx/"* "$app/assets/audio/sfx/glass/"
 # ps5-exporter (Marice, GPL-3.0): a title may not read the temperature, fan or
 # SoC power sensors, a payload may. The app sends it to elfldr when it is not
 # running. Pinned by version and hash, downloaded once into .deps.

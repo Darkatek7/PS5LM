@@ -52,6 +52,8 @@ bool load_font(hui::gfx::Renderer & r, const std::string & path, hui::gfx::Font 
 
 // A run as the console measured it: Qwen3.8-27B UD-Q2_K_XL, 64k, q4_0 cache.
 float g_loading = -1;  // >= 0: draw the loading state at this progress
+bool  g_decision = false;  // d1 Omni 600M instead of Qwen 3.8
+bool  g_empty = false;     // nothing loaded
 
 ps5lm::Live sample(float seconds, bool generating) {
     ps5lm::Live L;
@@ -134,6 +136,46 @@ ps5lm::Live sample(float seconds, bool generating) {
     usb.preset = "Gemma 4";
     usb.size_gib = 5.30;
     L.models.push_back(usb);
+    L.models[0].decision = "";
+    {
+        ps5lm::ModelRow d;
+        d.file = "/data/PS5LM/models/d1-omni-600M-BF16.gguf";
+        d.label = "d1-omni-600M-BF16";
+        d.plan = "decision model (lfm2-d1-omni), 4k context, f16 cache, images: 2.9 of 11.0 GiB";
+        d.decision = "lfm2-d1-omni";
+        d.size_gib = 0.71;
+        d.fits = true;
+        d.drive = "Internal storage";
+        L.models.push_back(d);
+    }
+    if (g_decision) {
+        for (auto & m : L.models) {
+            m.current = m.decision == "lfm2-d1-omni";
+        }
+        L.state = generating ? ps5lm::ServerState::generating : ps5lm::ServerState::ready;
+        L.model_label = "d1-omni-600M-BF16";
+        L.model_arch = "lfm2";
+        L.decision = "lfm2-d1-omni";
+        L.preset = "";
+        L.model_gib = 0.71;
+        L.ctx = 4096;
+        L.ctx_used = 793;
+        L.prompt_tps = 2140.0f;
+        L.gen_tps = 0;
+        L.tokens = 0;
+        L.prompt_tokens = 88412;
+        L.requests = 131;
+        L.free_gib = 8.6;
+    }
+    if (g_empty) {
+        L.state = ps5lm::ServerState::no_model;
+        L.model_label.clear();
+        L.decision.clear();
+        L.requests = L.tokens = L.prompt_tokens = 0;
+        for (auto & m : L.models) {
+            m.current = false;
+        }
+    }
     if (g_loading >= 0) {
         L.state = ps5lm::ServerState::loading;
         L.load_progress = g_loading;
@@ -147,11 +189,11 @@ ps5lm::Live sample(float seconds, bool generating) {
 }  // namespace
 
 int main(int argc, char ** argv) {
-    if (argc < 3) {
-        std::fprintf(stderr, "usage: %s <kit assets dir> <output dir>\n", argv[0]);
+    if (argc < 4) {
+        std::fprintf(stderr, "usage: %s <kit assets dir> <output dir> <app assets dir>\n", argv[0]);
         return 2;
     }
-    const std::string assets = argv[1], out = argv[2];
+    const std::string assets = argv[1], out = argv[2], app = argv[3];
     const int W = 1920, H = 1080;
     if (!open_context()) {
         std::fprintf(stderr, "no surfaceless EGL OpenGL 4.5 context\n");
@@ -161,9 +203,9 @@ int main(int argc, char ** argv) {
     hui::gfx::Renderer renderer;
     hui::gfx::Font regular, semibold, display, mono, pixel, hand;
     hui::ui::Fonts fonts;
-    if (!renderer.init() || !load_font(renderer, assets + "/fonts/inter-regular.huifont", &regular, &fonts.regular) ||
-        !load_font(renderer, assets + "/fonts/inter-semibold.huifont", &semibold, &fonts.semibold) ||
-        !load_font(renderer, assets + "/fonts/montserrat-medium.huifont", &display, &fonts.display) ||
+    if (!renderer.init() || !load_font(renderer, app + "/fonts/manrope-500.huifont", &regular, &fonts.regular) ||
+        !load_font(renderer, app + "/fonts/manrope-600.huifont", &semibold, &fonts.semibold) ||
+        !load_font(renderer, app + "/fonts/manrope-200.huifont", &display, &fonts.display) ||
         !load_font(renderer, assets + "/fonts/dejavu-sans-mono.huifont", &mono, &fonts.mono)) {
         return 1;
     }
@@ -301,72 +343,69 @@ int main(int argc, char ** argv) {
         return in;
     };
 
+    using D = hui::Direction;
+    using A = hui::Action;
     g_loading = 0.45f;
     step(90, {}, false);
-    shot("00-loading");
+    shot("00-home-loading");
     g_loading = -1;
     step(120, {}, true);
-    shot("01-dashboard");
-    // USAGE, POWER, then down to the Model tile.
-    step(20, nav(hui::Direction::right), true);
-    step(40, press(hui::Action::confirm), true);
-    shot("02a-usage");
-    step(30, press(hui::Action::back), true);
-    step(20, nav(hui::Direction::right), true);
-    step(40, press(hui::Action::confirm), true);
-    shot("02b-power");
-    step(30, press(hui::Action::back), true);
-    step(40, nav(hui::Direction::down), false);
-    shot("02-model-focus");
-    step(60, press(hui::Action::confirm), false);
-    shot("03-details");
-    step(60, press(hui::Action::north), false);
-    shot("03-library");
-    step(30, nav(hui::Direction::up), false);
-    shot("04-library-choose");
-    for (int i = 0; i < 3; ++i) {
-        step(25, nav(hui::Direction::down), false);
-    }
-    shot("05-library-usb");
-    step(30, press(hui::Action::back), false);
-    step(40, press(hui::Action::page_next), false);
-    shot("06-settings");
-    step(20, press(hui::Action::confirm), false);
-    step(30, nav(hui::Direction::down), false);
-    shot("07-settings-row");
-    step(20, press(hui::Action::back), false);
-    step(20, nav(hui::Direction::down), false);
-    step(30, press(hui::Action::confirm), false);
-    shot("08-settings-model");
-    step(20, press(hui::Action::back), false);
-    step(20, nav(hui::Direction::down), false);
-    step(20, press(hui::Action::confirm), false);
-    step(20, nav(hui::Direction::down), false);
-    step(30, nav(hui::Direction::down), false);
-    shot("08-settings-chat");
-    step(40, press(hui::Action::page_next), false);
-    shot("09-logs");
-    step(30, press(hui::Action::north), false);
-    shot("10-logs-errors");
-    step(40, press(hui::Action::page_next), false);
-    shot("11-market");
-    step(30, press(hui::Action::confirm), false);
-    step(20, nav(hui::Direction::down), false);
-    shot("12-market-files");
+    shot("01-home");
+    step(60, {}, false);
+    shot("02-home-idle");
+    g_decision = true;
+    step(60, {}, true);
+    shot("03-home-decision");
+    g_decision = false;
+    g_empty = true;
+    step(60, {}, false);
+    shot("04-home-empty");
+    g_empty = false;
+    step(40, press(A::confirm), false);
+    shot("05-models-local");
+    step(20, press(A::back), false);
+    step(20, nav(D::down), false);
+    step(20, press(A::confirm), false);
+    step(20, nav(D::down), false);
+    step(30, nav(D::down), false);
+    shot("06-models-suggested");
+    step(20, press(A::back), false);
+    step(20, nav(D::down), false);
+    step(20, press(A::confirm), false);
+    step(30, nav(D::down), false);
+    shot("07-models-search");
+    step(30, press(A::confirm), false);
     dash.set_market(mv);
-    step(30, press(hui::Action::confirm), false);
-    shot("13-market-space");
-    step(30, press(hui::Action::confirm), false);
-    shot("14-market-confirm");
-    step(20, press(hui::Action::back), false);
-    step(30, press(hui::Action::page_next), false);
-    shot("15-downloads");
-    step(20, nav(hui::Direction::down), false);
-    step(20, nav(hui::Direction::down), false);
-    step(20, press(hui::Action::west), false);
-    shot("16-downloads-cancel");
-    dash.set_busy("Applying the new limits", "Planning every model again for 32k tokens and the q8_0 cache");
-    step(20, press(hui::Action::back), false);
-    shot("17-busy");
+    step(20, nav(D::down), false);
+    shot("08-models-files");
+    step(30, press(A::confirm), false);
+    shot("09-models-space");
+    step(20, press(A::back), false);
+    step(20, press(A::back), false);
+    step(20, press(A::back), false);
+    step(20, nav(D::down), false);
+    step(20, press(A::confirm), false);
+    step(30, nav(D::down), false);
+    shot("10-models-downloads");
+    step(40, press(A::page_next), false);
+    shot("11-api");
+    g_decision = true;
+    step(40, {}, false);
+    shot("12-api-decision");
+    g_decision = false;
+    step(40, press(A::page_next), false);
+    shot("13-settings");
+    step(20, press(A::confirm), false);
+    step(30, nav(D::down), false);
+    shot("14-settings-row");
+    step(20, press(A::back), false);
+    for (int i = 0; i < 4; ++i) {
+        step(15, nav(D::down), false);
+    }
+    step(30, press(A::confirm), false);
+    shot("15-settings-diagnostics");
+    dash.set_busy("Loading Qwen3.8 27B", "Restarting with the whole memory for it, about 90 seconds");
+    step(30, {}, false);
+    shot("16-busy");
     return ok ? 0 : 1;
 }

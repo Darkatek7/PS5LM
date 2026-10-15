@@ -33,6 +33,7 @@ struct ModelRow {
     std::string arch;
     std::string plan;   // the planner's line ("64k context, q8_0 cache: 9.9 of 11.0 GiB")
     std::string preset;     // the preset that filled its sampling ("Qwen 3.8"), or empty
+    std::string decision;   // its decision type ("clef", "lfm2-d1"), empty for a language model
     double      size_gib = 0;
     bool        fits     = false;
     bool        current  = false;
@@ -47,6 +48,7 @@ struct Live {
     std::string model_label;
     std::string model_arch;
     std::string preset;      // "Qwen 3.8"
+    std::string decision;    // the decision type, empty for a language model
     double      model_gib = 0;
     uint32_t    ctx       = 0;
     std::string kv_type;

@@ -41,4 +41,4 @@ export -f compile
 export root kit obj cxx cc
 mapfile -t objects < <(printf '%s\n' "${sources[@]}" | xargs -P "$(nproc)" -I{} bash -c 'compile "$@"' _ {})
 $cxx "${objects[@]}" -lEGL -lGL -lm -pthread -o "$out/ps5lm_preview"
-"$out/ps5lm_preview" "$kit/assets" "$out"
+"$out/ps5lm_preview" "$kit/assets" "$out" "$root/ps5/app/assets"

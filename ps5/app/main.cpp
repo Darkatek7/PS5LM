@@ -45,6 +45,7 @@
 #include "model_plan.hpp"
 #include "settings.hpp"
 #include "stats.hpp"
+#include "suggested.hpp"
 #include "version.hpp"
 
 #include <ps5platform/heap.h>
@@ -446,6 +447,7 @@ struct Models {
             row.fits = p.fits;
             row.size_gib = m.file_bytes / 1073741824.0;
             row.preset = pre ? pre->label : "";
+            row.decision = m.decision;
             row.current = path == running;
             rows.push_back(row);
             std::printf("ps5lm-app: model %s (%s): %s\n", m.file_name.c_str(), m.arch.c_str(), p.why.c_str());
@@ -472,6 +474,7 @@ struct Models {
         model_part.args        = p.args;
         model_part.model_arch  = m.arch;
         model_part.preset      = pre ? pre->label : "";
+        model_part.decision    = m.decision;
         model_part.model_gib   = m.file_bytes / 1073741824.0;
         model_part.ctx         = p.ctx;
         model_part.kv_type     = p.kv_type;
@@ -573,9 +576,9 @@ int main(int, char **) {
     hui::gfx::Renderer renderer;
     hui::gfx::Font regular, semibold, headline, mono;
     hui::ui::Fonts fonts;
-    const bool ui_ok = renderer.init() && load_font(renderer, "inter-regular.huifont", &regular, &fonts.regular) &&
-                       load_font(renderer, "inter-semibold.huifont", &semibold, &fonts.semibold) &&
-                       load_font(renderer, "montserrat-medium.huifont", &headline, &fonts.display) &&
+    const bool ui_ok = renderer.init() && load_font(renderer, "manrope-500.huifont", &regular, &fonts.regular) &&
+                       load_font(renderer, "manrope-600.huifont", &semibold, &fonts.semibold) &&
+                       load_font(renderer, "manrope-200.huifont", &headline, &fonts.display) &&
                        load_font(renderer, "dejavu-sans-mono.huifont", &mono, &fonts.mono);
     fonts.pixel = fonts.mono;
     fonts.hand = fonts.regular;
@@ -676,7 +679,7 @@ int main(int, char **) {
     for (const auto & d : market.snapshot().downloads) {
         // Running already, maybe: the queue's thread starts it at once.
         if (d.state == DownloadState::queued || d.state == DownloadState::running) {
-            dash.show_page(Dashboard::kDownloadsPage);
+            dash.show_downloads();
             library_shown = true;  // stay on Downloads, not the library
             break;
         }
@@ -712,7 +715,7 @@ int main(int, char **) {
         }
         const bool serving = live.state == ServerState::ready || live.state == ServerState::generating;
         if (serving && !was_serving) {
-            notify("PS5LM: ready, chat in a browser on this network");
+            notify(live.decision.empty() ? "PS5LM: ready, chat in a browser on this network" : "PS5LM: ready for decisions at /v1/systemone");
         }
         was_serving = serving;
         if (n % 30 == 0) {
@@ -793,7 +796,7 @@ int main(int, char **) {
             }
             dash.set_market(std::move(mv));
         }
-        if (dash.page() == Dashboard::kLogsPage && n % 60 == 0) {
+        if (dash.wants_logs() && n % 60 == 0) {
             dash.set_logs(tail_lines(kLog), tail_lines(kLlamaLog));
         }
 
@@ -838,6 +841,17 @@ int main(int, char **) {
                 if (market.job(req.repo, req.file, req.path.empty() ? models.settings.download_dir : req.path, &job)) {
                     market.enqueue(job, free_gib(job.dir));
                 }
+                break;
+            }
+            case Dashboard::Request::suggested_download: {
+                const Suggestion & s = kSuggestions[std::clamp(req.repo, 0, kSuggestionCount - 1)];
+                const std::string dir = req.path.empty() ? models.settings.download_dir : req.path;
+                for (const SuggestedFile * f : { &s.model, &s.mmproj }) {
+                    if (f->file) {
+                        market.enqueue({ s.repo, f->file, f->sha256, dir, f->bytes, f->save_as ? f->save_as : "" }, free_gib(dir));
+                    }
+                }
+                dash.show_downloads();
                 break;
             }
             case Dashboard::Request::download_pause: market.pause(req.repo); break;

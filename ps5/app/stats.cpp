@@ -242,6 +242,7 @@ void StatsCollector::set_model(const Live & m) {
     live_.model_label = m.model_label;
     live_.model_arch  = m.model_arch;
     live_.preset      = m.preset;
+    live_.decision    = m.decision;
     live_.model_gib   = m.model_gib;
     live_.ctx         = m.ctx;
     live_.kv_type     = m.kv_type;

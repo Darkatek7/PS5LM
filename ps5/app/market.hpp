@@ -34,6 +34,7 @@ struct MarketRepo {
 struct MarketJob {
     std::string repo, file, sha256, dir;
     uint64_t    bytes = 0;
+    std::string save_as;         // the name on the console when it is not the file's ("mmproj-<model>.gguf")
 };
 
 enum class DownloadState : uint8_t { queued, running, retrying, paused, failed, done };

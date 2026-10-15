@@ -1,12 +1,17 @@
-// PS5LM's screen: a bento grid of live tiles in the language of
-// ps5-homebrew-ui's "Pulse Dashboard" design (its palette, grid, panels,
-// focus ring and spatial navigation), showing the model, its speed, the GPU,
-// the CPU and the memory they share. Cross on the Model tile opens the model
-// library; picking one asks the app to load it.
+// PS5LM's screen, three pages switched with L1/R1:
+//   - Dashboard: a bento grid of live tiles in the language of
+//     ps5-homebrew-ui's "Pulse Dashboard" design (its palette, grid, panels,
+//     focus ring and spatial navigation). Cross on the Model tile opens the
+//     model's details, Triangle the model library.
+//   - Settings: a rail of categories and rows of toggles and steppers, after
+//     the kit's "Control Room" design, in the Pulse palette.
+//   - Logs: app.log and llama.log, scrollable.
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 
+#include "market.hpp"
+#include "settings.hpp"
 #include "stats.hpp"
 
 #include "core/input.hpp"
@@ -18,6 +23,7 @@
 #include "ui/motion.hpp"
 
 #include <string>
+#include <vector>
 
 namespace ps5lm {
 
@@ -32,18 +38,46 @@ struct DashboardFrame {
 class Dashboard {
   public:
     static constexpr int kTiles = 8;
+    static constexpr int kPages = 5;
+    static constexpr int kLogsPage = 2;
+    static constexpr int kMarketPage = 3;
+    static constexpr int kDownloadsPage = 4;
 
     explicit Dashboard(const hui::ui::Fonts & fonts) : fonts_(fonts) { ring_.snap(ring_rect()); }
 
     void set_live(const Live & live) { live_ = live; }
+    // Slow work in progress: a spinner and these lines over everything, and
+    // no input until it is cleared (empty title).
+    void set_busy(std::string title, std::string text = {}) {
+        busy_title_ = std::move(title);
+        busy_text_ = std::move(text);
+    }
+    bool busy() const { return !busy_title_.empty(); }
     void open_library();  // over the dashboard, cursor on the loaded model
+    void set_settings(const Settings & s) { settings_ = s; }
+    const Settings & settings() const { return settings_; }
+    void set_logs(std::vector<std::string> app, std::vector<std::string> llama);
+    void set_market(MarketView view) { market_ = std::move(view); }
+    int  page() const { return page_; }
+    void show_page(int page) {
+        page_from_ = page_;
+        page_ = page;
+        page_age_ = 0;
+        if (page == kMarketPage && !market_searched_) {
+            market_searched_ = true;
+            request_ = { Request::market_search, "" };  // the popular list, as arriving with R1 does
+        }
+    }
     void update(const hui::InputFrame & input, float dt, hui::ui::Feedback & feedback);
     void draw(DashboardFrame & frame) const;
 
-    // What the user asked for in the library, once: load or unload a model.
+    // What the user asked for, once: load or unload a model, or the settings
+    // changed (read them with settings()).
     struct Request {
-        enum Kind { none, load, unload } kind = none;
-        std::string path;
+        enum Kind { none, load, unload, settings, clear_scratch, market_search, market_open, market_plan, market_download,
+                    market_download_unload, download_pause, download_resume, download_remove } kind = none;
+        std::string path;   // a model, a market query, or the folder a download goes to (empty: the setting)
+        int repo = -1, file = -1;  // a market file, or (repo) a download's index
     };
     Request take_request() {
         Request r = request_;
@@ -58,6 +92,22 @@ class Dashboard {
     void draw_header(hui::gfx::DrawList & list) const;
     void draw_library(hui::gfx::DrawList & list, std::uint32_t glass) const;
     void draw_hints(DashboardFrame & frame) const;
+    void draw_tabs(hui::gfx::DrawList & list) const;
+    void draw_details(hui::gfx::DrawList & list, std::uint32_t glass) const;
+    void draw_usage_details(hui::gfx::DrawList & list, const hui::gfx::Rect & panel) const;
+    void draw_power_details(hui::gfx::DrawList & list, const hui::gfx::Rect & panel) const;
+    void draw_settings(hui::gfx::DrawList & list) const;
+    void draw_logs(hui::gfx::DrawList & list) const;
+    void update_dashboard(const hui::InputFrame & input, hui::ui::Feedback & feedback);
+    void update_settings(const hui::InputFrame & input, hui::ui::Feedback & feedback);
+    void update_logs(const hui::InputFrame & input, hui::ui::Feedback & feedback);
+    void update_market(const hui::InputFrame & input, hui::ui::Feedback & feedback);
+    void start_download(hui::ui::Feedback & feedback);
+    void update_downloads(const hui::InputFrame & input, hui::ui::Feedback & feedback);
+    void draw_downloads(hui::gfx::DrawList & list) const;
+    void draw_market(hui::gfx::DrawList & list) const;
+    const std::vector<std::string> & log_view() const { return log_llama_ ? llama_view_ : app_view_; }
+    void refilter_logs();
 
     const hui::ui::Fonts & fonts_;
     Live        live_;
@@ -65,6 +115,8 @@ class Dashboard {
 
     float age_   = 0;  // seconds since start: the entrance
     float clock_ = 0;  // idle motion
+    std::string busy_title_, busy_text_;
+    void draw_busy(hui::gfx::DrawList & list) const;
     int   focus_ = 0;
     int   came_from_ = -1;
     hui::Direction came_by_ = hui::Direction::none;
@@ -78,6 +130,38 @@ class Dashboard {
     hui::tween::Spring library_;   // 0 closed, 1 open
     hui::tween::Spring cursor_y_;  // the highlight's slot
     int slot(int row) const;       // a model row's line in the list, after the section headers
+
+    bool details_open_ = false;
+    int  detail_tile_ = 0;         // which tile the open details belong to
+    hui::tween::Spring details_;   // 0 closed, 1 open
+
+    int   page_ = 0;
+    int   page_from_ = 0;
+    float page_age_ = 10;          // seconds since the page changed
+
+    Settings settings_;
+    int   setting_category_ = 0;
+    int   setting_row_ = 0;
+    bool  in_rows_ = false;        // the focus is on the rows, not the rail
+    hui::ui::SpringRect setting_focus_;
+
+    std::vector<std::string> app_log_, llama_log_;    // as read
+    std::vector<std::string> app_view_, llama_view_;  // after the filter
+    bool  log_llama_ = false;
+    bool  log_errors_ = false;
+    int   log_scroll_ = 0;         // lines up from the newest
+
+    MarketView market_;
+    int   market_chip_ = 0;        // which search the chips select
+    int   market_repo_ = 0;        // cursor in the repositories
+    int   market_file_ = 0;        // cursor in the open repository's files
+    bool  market_files_ = false;   // the cursor is in the files
+    bool  market_searched_ = false;
+    bool  market_confirm_ = false;  // asking whether to unload the model first
+    bool  market_space_ = false;    // telling that the download does not fit where it would go
+    std::string market_dir_;        // where this download goes instead of the setting, or empty
+    int   dl_cursor_ = 0;           // the Downloads page's row
+    int   dl_confirm_ = -1;         // the row Square was pressed on once (a second press deletes)
     mutable char size_text_[64] = {};
 };
 

@@ -56,7 +56,7 @@ float g_loading = -1;  // >= 0: draw the loading state at this progress
 ps5lm::Live sample(float seconds, bool generating) {
     ps5lm::Live L;
     L.state       = generating ? ps5lm::ServerState::generating : ps5lm::ServerState::ready;
-    L.address     = "http://192.168.1.19:8081";
+    L.address     = "192.168.1.19:8081";
     L.model_label = "Qwen3.8-27B-UD-Q2_K_XL";
     L.model_arch  = "qwen35";
     L.preset      = "Qwen 3.8";
@@ -64,6 +64,21 @@ ps5lm::Live sample(float seconds, bool generating) {
     L.ctx         = 65536;
     L.kv_type     = "q4_0";
     L.kv_gib      = 1.13;
+    L.model_file  = "/data/PS5LM/models/Qwen3.8-27B-UD-Q2_K_XL.gguf";
+    L.plan        = "64k context, q4_0 cache: 11.3 of 11.4 GiB";
+    L.args = { "-m", L.model_file, "-ngl", "999", "-fit", "off", "-lm", "none", "-c", "65536", "-fa", "on",
+               "-ctk", "q4_0", "-ctv", "q4_0", "-b", "256", "-ub", "64", "-np", "1", "-ctxcp", "1", "-cram", "0",
+               "--host", "0.0.0.0", "--port", "8081", "--temp", "0.6", "--top-p", "0.95", "--top-k", "20",
+               "--min-p", "0", "--metrics" };
+    L.soc_temp    = 61;
+    L.cpu_temp    = 54;
+    L.soc_power_w = 86;
+    L.energy_wh   = 0.42;
+    L.fan         = 0.23f;
+    L.temps = { { "cpu", 54 }, { "soc0", 61 }, { "soc1", 60 }, { "soc2", 59 }, { "soc3", 62 }, { "soc4", 61 },
+                { "soc5", 60 }, { "soc6", 58 } };
+    L.cpu_ghz     = 3.5f;
+    L.drives = { { "Internal storage", "/data/PS5LM/models", 8, 825 }, { "M.2 drive", "/mnt/ext0/PS5LM/models", 1520, 1863 }, { "USB drive", "/mnt/usb0/PS5LM/models", 455, 477 } };
     L.pool_gib    = 11.44;
     L.free_gib    = 0.31;
     L.heap_gib    = 0.76;
@@ -80,6 +95,8 @@ ps5lm::Live sample(float seconds, bool generating) {
         L.gen_history.push_back(tps);
         L.gpu_history.push_back(on ? 0.92f + 0.05f * std::sin(i * 0.3f) : 0.03f);
         L.cpu_history.push_back(on ? 0.11f + 0.03f * std::sin(i * 0.5f) : 0.02f);
+        L.temp_history.push_back(on ? 60.0f + 2.0f * std::sin(i * 0.2f) : 52.0f);
+        L.power_history.push_back(on ? 85.0f + 1.5f * std::sin(i * 0.4f) : 23.0f);
     }
     L.gen_tps  = generating ? 20.7f : 0.0f;
     L.gpu_busy = generating ? 0.94f : 0.02f;
@@ -93,6 +110,7 @@ ps5lm::Live sample(float seconds, bool generating) {
     for (int i = 0; i < 5; ++i) {
         ps5lm::ModelRow m;
         m.file = std::string("/data/PS5LM/models/") + files[i] + ".gguf";
+        m.drive = "Internal storage";
         m.label = files[i];
         m.plan = plans[i];
         m.size_gib = sizes[i];
@@ -107,7 +125,8 @@ ps5lm::Live sample(float seconds, bool generating) {
     usb.plan = "64k context, q8_0 cache: 8.6 of 11.0 GiB";
     usb.preset = "Ornith 1.5";
     usb.size_gib = 5.38;
-    usb.fits = usb.on_usb = true;
+    usb.fits = true;
+    usb.drive = "USB drive";
     L.models.push_back(usb);
     usb.file = "/mnt/usb0/PS5LM/models/gemma-4-12b-it-Q3_K_M.gguf";
     usb.label = "gemma-4-12b-it-Q3_K_M";
@@ -161,6 +180,75 @@ int main(int argc, char ** argv) {
 
     hui::save::ensure_directory(out);
     ps5lm::Dashboard dash(fonts);
+    ps5lm::Settings settings;
+    settings.default_model = "/data/PS5LM/models/Qwen3.8-27B-UD-Q2_K_XL.gguf";
+    dash.set_settings(settings);
+    std::vector<std::string> app_log, llama_log;
+    for (int i = 0; i < 60; ++i) {
+        app_log.push_back("[ps5-present-perf] calls=2500 failures=0 warmup_frames=30 idle_ms=0.000898 flip_ms=0.000889");
+        app_log.push_back("ps5lm-app: model Qwen3.8-27B-UD-IQ2_XXS.gguf (qwen35): 64k context, q8_0 cache: 9.9 of 11.0 GiB");
+        llama_log.push_back("7.15.902.312 I slot print_timing: id  0 | task 646 | n_gen =    162, tg =  20.44 t/s");
+    }
+    app_log.push_back("ps5lm-app: accept failed, errno 53");
+    app_log.push_back("W srv          stop: cancel task, id_task = 22182");
+    dash.set_logs(app_log, llama_log);
+    ps5lm::MarketView mv;
+    const char * ids[] = { "unsloth/Qwen3.8-27B-GGUF", "unsloth/gemma-4-E4B-it-GGUF", "bartowski/Llama-3.2-3B-Instruct-GGUF",
+                           "ggml-org/gpt-oss-20b-GGUF", "unsloth/Qwen3.5-9B-GGUF", "bartowski/Mistral-7B-Instruct-v0.3-GGUF" };
+    for (int i = 0; i < 6; ++i) {
+        ps5lm::MarketRepo r;
+        r.id = ids[i];
+        r.downloads = 812000 / (i + 1);
+        mv.repos.push_back(r);
+    }
+    mv.open = 0;
+    const char * fnames[] = { "Qwen3.8-27B-UD-IQ2_XXS.gguf", "Qwen3.8-27B-UD-Q2_K_XL.gguf", "Qwen3.8-27B-Q3_K_M.gguf", "Qwen3.8-27B-Q4_K_M.gguf" };
+    const double fsz[] = { 6.8, 9.2, 12.6, 15.4 };
+    const int ffits[] = { 1, 1, 0, 0 };
+    const char * fplans[] = { "64k context, q8_0 cache: 9.9 of 11.0 GiB", "32k context, q4_0 cache: 10.8 of 11.0 GiB",
+                              "too big: the weights alone need more than is free", "too big: the weights alone need more than is free" };
+    for (int i = 0; i < 4; ++i) {
+        ps5lm::MarketFile f;
+        f.name = fnames[i];
+        f.bytes = (uint64_t) (fsz[i] * 1073741824.0);
+        f.fits = ffits[i];
+        f.plan = fplans[i];
+        mv.repos[0].files.push_back(f);
+    }
+    {
+        ps5lm::Download d;
+        d.repo = "unsloth/Qwen3.8-27B-GGUF";
+        d.file = "Qwen3.8-27B-UD-IQ2_XXS.gguf";
+        d.dir = "/data/PS5LM/models";
+        d.bytes = (uint64_t) (6.8 * 1073741824.0);
+        d.done = (uint64_t) (2.5 * 1073741824.0);
+        d.state = ps5lm::DownloadState::running;
+        d.mbps = 14.2;
+        mv.downloads.push_back(d);
+        d.file = "gemma-4-12b-it-Q4_K_M.gguf";
+        d.repo = "unsloth/gemma-4-12b-it-GGUF";
+        d.dir = "/mnt/usb0/PS5LM/models";
+        d.bytes = (uint64_t) (7.1 * 1073741824.0);
+        d.done = 0;
+        d.mbps = 0;
+        d.state = ps5lm::DownloadState::queued;
+        mv.downloads.push_back(d);
+        d.file = "Llama-3.2-3B-Instruct-Q4_K_M.gguf";
+        d.repo = "bartowski/Llama-3.2-3B-Instruct-GGUF";
+        d.bytes = 2019377696;
+        d.done = 812000000;
+        d.state = ps5lm::DownloadState::retrying;
+        d.note = "Connection lost (sceHttp2ReadData 0x804101a3); trying again in 12 s, attempt 2";
+        mv.downloads.push_back(d);
+        d.file = "SmolLM2-135M-Instruct-F16.gguf";
+        d.repo = "unsloth/SmolLM2-135M-Instruct-GGUF";
+        d.dir = "/data/PS5LM/models";
+        d.bytes = d.done = 270885952;
+        d.state = ps5lm::DownloadState::done;
+        d.note = "Saved to /data/PS5LM/models/SmolLM2-135M-Instruct-F16.gguf";
+        mv.downloads.push_back(d);
+    }
+    dash.set_market(mv);
     std::vector<unsigned char> pixels((size_t) W * H * 4);
     stbi_flip_vertically_on_write(1);
     hui::ui::Feedback feedback;
@@ -219,12 +307,20 @@ int main(int argc, char ** argv) {
     g_loading = -1;
     step(120, {}, true);
     shot("01-dashboard");
-    // To the Model tile: right twice along the top, then down.
+    // USAGE, POWER, then down to the Model tile.
     step(20, nav(hui::Direction::right), true);
+    step(40, press(hui::Action::confirm), true);
+    shot("02a-usage");
+    step(30, press(hui::Action::back), true);
     step(20, nav(hui::Direction::right), true);
+    step(40, press(hui::Action::confirm), true);
+    shot("02b-power");
+    step(30, press(hui::Action::back), true);
     step(40, nav(hui::Direction::down), false);
     shot("02-model-focus");
     step(60, press(hui::Action::confirm), false);
+    shot("03-details");
+    step(60, press(hui::Action::north), false);
     shot("03-library");
     step(30, nav(hui::Direction::up), false);
     shot("04-library-choose");
@@ -232,5 +328,45 @@ int main(int argc, char ** argv) {
         step(25, nav(hui::Direction::down), false);
     }
     shot("05-library-usb");
+    step(30, press(hui::Action::back), false);
+    step(40, press(hui::Action::page_next), false);
+    shot("06-settings");
+    step(20, press(hui::Action::confirm), false);
+    step(30, nav(hui::Direction::down), false);
+    shot("07-settings-row");
+    step(20, press(hui::Action::back), false);
+    step(20, nav(hui::Direction::down), false);
+    step(30, press(hui::Action::confirm), false);
+    shot("08-settings-model");
+    step(20, press(hui::Action::back), false);
+    step(20, nav(hui::Direction::down), false);
+    step(20, press(hui::Action::confirm), false);
+    step(20, nav(hui::Direction::down), false);
+    step(30, nav(hui::Direction::down), false);
+    shot("08-settings-chat");
+    step(40, press(hui::Action::page_next), false);
+    shot("09-logs");
+    step(30, press(hui::Action::north), false);
+    shot("10-logs-errors");
+    step(40, press(hui::Action::page_next), false);
+    shot("11-market");
+    step(30, press(hui::Action::confirm), false);
+    step(20, nav(hui::Direction::down), false);
+    shot("12-market-files");
+    dash.set_market(mv);
+    step(30, press(hui::Action::confirm), false);
+    shot("13-market-space");
+    step(30, press(hui::Action::confirm), false);
+    shot("14-market-confirm");
+    step(20, press(hui::Action::back), false);
+    step(30, press(hui::Action::page_next), false);
+    shot("15-downloads");
+    step(20, nav(hui::Direction::down), false);
+    step(20, nav(hui::Direction::down), false);
+    step(20, press(hui::Action::west), false);
+    shot("16-downloads-cancel");
+    dash.set_busy("Applying the new limits", "Planning every model again for 32k tokens and the q8_0 cache");
+    step(20, press(hui::Action::back), false);
+    shot("17-busy");
     return ok ? 0 : 1;
 }

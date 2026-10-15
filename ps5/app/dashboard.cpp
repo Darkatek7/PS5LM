@@ -4,11 +4,14 @@
 // ps5-homebrew-ui's src/concepts/dashboard.cpp ("Pulse Dashboard",
 // BlackBearReloaded, GPL-3.0-or-later); the tiles and their data are PS5LM's.
 #include "dashboard.hpp"
+#include "version.hpp"
 
 #include "ui/glyphs.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <iterator>
 #include <cmath>
 #include <cstdio>
 #include <span>
@@ -36,7 +39,8 @@ const Color kCyan        = Color::rgb(0x4fe0ff);  // speed and the GPU
 const Color kLime        = Color::rgb(0xb8f26b);  // the CPU and the model
 const Color kAmber       = Color::rgb(0xffc24a);  // memory
 const Color kRose        = Color::rgb(0xff6f9c);  // GPU memory
-const Color kBrand       = Color::rgb(0x8288f0);  // PS5LM's periwinkle
+const Color kBrand       = Color::rgb(0x8288f0);  // PS5LM's periwinkle, and the context
+const Color kHeat        = Color::rgb(0xff8a5c);  // temperatures
 
 constexpr float kMuted = 0.62f;
 constexpr float kFaint = 0.38f;
@@ -47,7 +51,7 @@ constexpr float kLabelY = 46.0f, kLabelSize = 17.0f, kLift = 0.02f;
 constexpr float kTau = 6.2831853f;
 constexpr const char * kDash = "\xE2\x80\x94";
 
-enum Tile : int { kSpeed, kGpu, kCpu, kMemory, kVram, kSession, kContext, kModel };
+enum Tile : int { kSpeed, kUsage, kPower, kMemory, kContext, kStorage, kThermals, kModel };
 
 struct TileSpec {
     const char *  label;
@@ -58,12 +62,12 @@ struct TileSpec {
 // In reading order: ties in the navigation go to the earlier tile.
 constexpr TileSpec kSpec[Dashboard::kTiles] = {
     { "GENERATION", 0, 0, 6, 2, 0x4fe0ff },
-    { "GPU", 6, 0, 3, 2, 0x4fe0ff },
-    { "CPU", 9, 0, 3, 2, 0xb8f26b },
-    { "MEMORY", 0, 2, 3, 2, 0xffc24a },
-    { "GPU MEMORY", 3, 2, 6, 1, 0xff6f9c },
-    { "SESSION", 3, 3, 3, 1, 0x4fe0ff },
-    { "CONTEXT", 6, 3, 3, 1, 0xffc24a },
+    { "USAGE", 6, 0, 3, 2, 0x4fe0ff },
+    { "POWER", 9, 0, 3, 2, 0xffd166 },
+    { "MEMORY", 0, 2, 6, 1, 0xffc24a },
+    { "CONTEXT", 0, 3, 3, 1, 0x8288f0 },
+    { "STORAGE", 3, 3, 3, 1, 0xff6f9c },
+    { "THERMALS", 6, 2, 3, 2, 0xff8a5c },
     { "MODEL", 9, 2, 3, 2, 0xb8f26b },
 };
 
@@ -155,6 +159,70 @@ Color state_color(ServerState s) {
 
 constexpr float kRowH = 78.0f;
 constexpr Rect  kLibrary{ 360.0f, 150.0f, 1200.0f, 800.0f };
+constexpr const char * kPageNames[Dashboard::kPages] = { "Dashboard", "Settings", "Logs", "Get models", "Downloads" };
+
+// The market's searches, switched with L2/R2: Hugging Face's most downloaded
+// GGUF repositories, then the families the presets know.
+constexpr const char * kMarketChips[] = { "Popular", "Qwen", "Gemma", "Llama", "Mistral", "Phi", "Granite" };
+constexpr int          kMarketChipCount = 7;
+constexpr float        kMarketRowH = 66.0f;
+constexpr int          kMarketRows = 9;
+
+// ---- Settings: categories of rows, after the kit's "Control Room" ---------------
+
+enum class Setting : int { auto_load, default_model, ctx_cap, kv_type, sounds, tools, scratch_limit, clear_scratch, download_dir };
+
+struct SettingRow {
+    Setting      id;
+    const char * label;
+    const char * help;
+};
+
+struct SettingCategory {
+    const char *     name;
+    const char *     about;
+    SettingRow       rows[4];
+    int              count;
+};
+
+constexpr SettingCategory kCategories[] = {
+    { "Startup", "What the app does when it opens.",
+      { { Setting::auto_load, "Load a model at launch", "Off: the app opens the library and waits for a choice." },
+        { Setting::default_model, "Model to load", "One of the models the library lists." } },
+      2 },
+    { "Model", "How the planner sizes a model. Applies the next time a model loads.",
+      { { Setting::ctx_cap, "Longest context", "The planner picks the longest context up to this that fits." },
+        { Setting::kv_type, "KV cache", "Auto picks the best that fits; a fixed type trades context for quality." } },
+      2 },
+    { "Chat", "The browser chat's tools, and the folder they work in.",
+      { { Setting::tools, "File tools", "The model may read, write and search files in /data/PS5LM/scratch. Applies at the next load." },
+        { Setting::scratch_limit, "Warn above", "A notification when the scratch folder grows past this." },
+        { Setting::clear_scratch, "Clear the scratch folder", "Deletes everything the chat's tools wrote." } },
+      3 },
+    { "App", "The app itself.",
+      { { Setting::sounds, "Sounds", "Interface sounds on the TV." },
+        { Setting::download_dir, "Download to", "Where Get models saves: internal storage, or PS5LM/models on an M.2 or USB drive." } },
+      2 },
+};
+constexpr int kCategoryCount = 4;
+
+constexpr uint32_t     kCtxSteps[] = { 4096, 8192, 16384, 32768, 65536, 131072 };
+constexpr const char * kKvSteps[] = { "auto", "f16", "q8_0", "q4_0" };
+
+constexpr float kRailX = 96.0f, kRailY = 236.0f, kRailW = 372.0f, kRailH = 72.0f, kRailPitch = 84.0f;
+constexpr Rect  kSettingsPanel{ 504.0f, 236.0f, 1320.0f, 692.0f };
+constexpr float kSetRowsY = kSettingsPanel.y + 112.0f, kSetRowH = 80.0f, kSetRowPitch = 92.0f;
+
+Rect rail_rect(int category) { return { kRailX, kRailY + category * kRailPitch, kRailW, kRailH }; }
+Rect setting_rect(int row) {
+    return { kSettingsPanel.x + 24, kSetRowsY + row * kSetRowPitch, kSettingsPanel.w - 48, kSetRowH };
+}
+
+// ---- Logs ---------------------------------------------------------------------------
+
+constexpr Rect  kLogPanel{ 96.0f, 164.0f, 1728.0f, 800.0f };
+constexpr float kLogLineH = 27.0f;
+constexpr int   kLogLines = 25;
 
 }  // namespace
 
@@ -164,11 +232,79 @@ Rect Dashboard::ring_rect() const {
     return scaled(tile_rect(focus_), 1.0f + kLift).inset(-5.0f);
 }
 
-void Dashboard::update(const hui::InputFrame & input, float dt, ui::Feedback & feedback) {
+void Dashboard::update(const hui::InputFrame & raw, float dt, ui::Feedback & feedback) {
+    const hui::InputFrame none{};
+    const hui::InputFrame & input = busy() ? none : raw;  // busy: the screen says so, buttons wait
     age_ += dt;
     clock_ += dt;
-    const int rows = (int) live_.models.size();
+    page_age_ += dt;
 
+    // L1/R1 change the page, unless an overlay has the focus.
+    const bool overlay = library_open_ || details_open_;
+    const int  step = input.is_pressed(Action::page_next) ? 1 : input.is_pressed(Action::page_prev) ? -1 : 0;
+    if (step != 0 && !overlay) {
+        const int next = page_ + step;
+        if (next >= 0 && next < kPages) {
+            page_from_ = page_;
+            page_ = next;
+            page_age_ = 0;
+            feedback.play(hui::audio::Cue::tab, 1.0f + 0.04f * (float) page_, 0.0f);
+            if (page_ == kLogsPage) {
+                log_scroll_ = 0;
+            }
+            if (page_ == kMarketPage && !market_searched_) {
+                market_searched_ = true;
+                request_ = { Request::market_search, "" };
+            }
+        } else {
+            feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
+        }
+    } else if (page_ == 0 || overlay) {
+        update_dashboard(input, feedback);
+    } else if (page_ == 1) {
+        update_settings(input, feedback);
+    } else if (page_ == kLogsPage) {
+        update_logs(input, feedback);
+    } else if (page_ == kDownloadsPage) {
+        update_downloads(input, feedback);
+    } else {
+        update_market(input, feedback);
+    }
+
+    for (int i = 0; i < kTiles; ++i) {
+        lift_[i].target = i == focus_ ? 1.0f : 0.0f;
+        lift_[i].update(dt, 16.0f);
+    }
+    ring_.target(ring_rect());
+    ring_.update(dt, 20.0f);
+    refusal_.update(dt, 9.0f);
+    library_.target = library_open_ ? 1.0f : 0.0f;
+    library_.update(dt, 13.0f);
+    details_.target = details_open_ ? 1.0f : 0.0f;
+    details_.update(dt, 13.0f);
+    cursor_y_.target = (float) slot(library_cursor_);
+    cursor_y_.update(dt, 20.0f);
+    const Rect target = in_rows_ ? setting_rect(setting_row_) : rail_rect(setting_category_);
+    if (age_ <= dt) {
+        setting_focus_.snap(target);
+    }
+    setting_focus_.target(target);
+    setting_focus_.update(dt, 20.0f);
+}
+
+void Dashboard::update_dashboard(const hui::InputFrame & input, ui::Feedback & feedback) {
+    const int rows = (int) live_.models.size();
+    if (details_open_) {
+        if (input.is_pressed(Action::north) && detail_tile_ == kModel) {
+            details_open_ = false;
+            open_library();
+            feedback.play(hui::audio::Cue::open);
+        } else if (input.is_pressed(Action::back) || input.is_pressed(Action::confirm)) {
+            details_open_ = false;
+            feedback.play(hui::audio::Cue::back);
+        }
+        return;
+    }
     if (library_open_) {
         if (input.nav == Direction::up || input.nav == Direction::down) {
             const int next = library_cursor_ + (input.nav == Direction::down ? 1 : -1);
@@ -199,47 +335,441 @@ void Dashboard::update(const hui::InputFrame & input, float dt, ui::Feedback & f
             library_open_ = false;
             feedback.play(hui::audio::Cue::back);
         }
-    } else {
-        if (input.nav != Direction::none) {
-            std::array<Rect, kTiles> rects;
-            for (int i = 0; i < kTiles; ++i) {
-                rects[(size_t) i] = tile_rect(i);
+        return;
+    }
+    if (input.nav != Direction::none) {
+        std::array<Rect, kTiles> rects;
+        for (int i = 0; i < kTiles; ++i) {
+            rects[(size_t) i] = tile_rect(i);
+        }
+        int next = input.nav == opposite(came_by_) ? came_from_ : spatial_next(rects, focus_, input.nav);
+        if (next < 0) {
+            next = spatial_next(rects, focus_, input.nav);
+        }
+        if (next >= 0) {
+            came_from_ = focus_;
+            came_by_   = input.nav;
+            focus_     = next;
+            const Rect r = tile_rect(focus_);
+            feedback.play(hui::audio::Cue::focus, 1.08f - 0.16f * (r.cy() - kGridY) / kGridH, ui::pan_for_x(r.cx()));
+        } else if (!input.nav_repeat) {
+            feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
+            feedback.rumble(0.25f, 0.05f);
+            refusal_.trigger();
+            refusal_x_ = input.nav == Direction::right ? 1.0f : input.nav == Direction::left ? -1.0f : 0.0f;
+            refusal_y_ = input.nav == Direction::down ? 1.0f : input.nav == Direction::up ? -1.0f : 0.0f;
+        }
+    }
+    // USAGE and POWER expand on Cross.
+    if ((focus_ == kUsage || focus_ == kPower) && input.is_pressed(Action::confirm)) {
+        details_open_ = true;
+        detail_tile_ = focus_;
+        feedback.play(hui::audio::Cue::open);
+        return;
+    }
+    // The Model tile: Cross shows the loaded model's details (or the library
+    // when nothing is loaded), Triangle the library.
+    if (focus_ == kModel && input.is_pressed(Action::north)) {
+        open_library();
+        feedback.play(hui::audio::Cue::open);
+    } else if (focus_ == kModel && input.is_pressed(Action::confirm)) {
+        if (live_.model_label.empty()) {
+            open_library();
+        } else {
+            details_open_ = true;
+            detail_tile_ = kModel;
+        }
+        feedback.play(hui::audio::Cue::open);
+    }
+}
+
+namespace {
+
+// The value of a setting as the row shows it, and one step of it.
+std::string setting_text(const Settings & s, Setting id, const std::vector<ModelRow> & models,
+                         const std::vector<Drive> & drives) {
+    char t[32];
+    switch (id) {
+        case Setting::default_model: {
+            if (s.default_model.empty()) {
+                return "None";
             }
-            int next = input.nav == opposite(came_by_) ? came_from_ : spatial_next(rects, focus_, input.nav);
-            if (next < 0) {
-                next = spatial_next(rects, focus_, input.nav);
+            for (const auto & m : models) {
+                if (m.file == s.default_model) {
+                    return m.label;
+                }
             }
-            if (next >= 0) {
-                came_from_ = focus_;
-                came_by_   = input.nav;
-                focus_     = next;
-                const Rect r = tile_rect(focus_);
-                feedback.play(hui::audio::Cue::focus, 1.08f - 0.16f * (r.cy() - kGridY) / kGridH, ui::pan_for_x(r.cx()));
+            const size_t slash = s.default_model.find_last_of('/');
+            return s.default_model.substr(slash == std::string::npos ? 0 : slash + 1) + " (missing)";
+        }
+        case Setting::ctx_cap:
+            std::snprintf(t, sizeof(t), "%uk tokens", s.ctx_cap / 1024);
+            return t;
+        case Setting::kv_type: return s.kv_type == "auto" ? "Auto" : s.kv_type;
+        case Setting::scratch_limit:
+            std::snprintf(t, sizeof(t), "%u GiB", s.scratch_limit_gib);
+            return t;
+        case Setting::download_dir: {
+            for (const auto & d : drives) {
+                if (d.models == s.download_dir) {
+                    return d.name;
+                }
+            }
+            return s.download_dir.rfind("/mnt/ext", 0) == 0 ? "M.2 drive (not found)" : "USB drive (not found)";
+        }
+        default: return "";
+    }
+}
+
+bool is_toggle(Setting id) { return id == Setting::auto_load || id == Setting::sounds || id == Setting::tools; }
+
+bool toggle_value(const Settings & s, Setting id) {
+    return id == Setting::auto_load ? s.auto_load : id == Setting::sounds ? s.sounds : s.tools;
+}
+
+constexpr uint32_t kScratchSteps[] = { 1, 2, 5, 10, 20 };
+
+// Moves a stepper one place; false at either end.
+bool step_setting(Settings & s, Setting id, int dir, const std::vector<ModelRow> & models, const std::vector<Drive> & drives) {
+    switch (id) {
+        case Setting::default_model: {
+            // "None", then each model that fits, in the library's order.
+            std::vector<std::string> choices = { "" };
+            for (const auto & m : models) {
+                if (m.fits) {
+                    choices.push_back(m.file);
+                }
+            }
+            int at = 0;
+            for (int i = 0; i < (int) choices.size(); ++i) {
+                if (choices[(size_t) i] == s.default_model) {
+                    at = i;
+                }
+            }
+            const int next = at + dir;
+            if (next < 0 || next >= (int) choices.size()) {
+                return false;
+            }
+            s.default_model = choices[(size_t) next];
+            return true;
+        }
+        case Setting::ctx_cap: {
+            int at = 4;
+            for (int i = 0; i < 6; ++i) {
+                if (kCtxSteps[i] == s.ctx_cap) {
+                    at = i;
+                }
+            }
+            if (at + dir < 0 || at + dir >= 6) {
+                return false;
+            }
+            s.ctx_cap = kCtxSteps[at + dir];
+            return true;
+        }
+        case Setting::kv_type: {
+            int at = 0;
+            for (int i = 0; i < 4; ++i) {
+                if (s.kv_type == kKvSteps[i]) {
+                    at = i;
+                }
+            }
+            if (at + dir < 0 || at + dir >= 4) {
+                return false;
+            }
+            s.kv_type = kKvSteps[at + dir];
+            return true;
+        }
+        case Setting::scratch_limit: {
+            int at = 1;
+            for (int i = 0; i < 5; ++i) {
+                if (kScratchSteps[i] == s.scratch_limit_gib) {
+                    at = i;
+                }
+            }
+            if (at + dir < 0 || at + dir >= 5) {
+                return false;
+            }
+            s.scratch_limit_gib = kScratchSteps[at + dir];
+            return true;
+        }
+        case Setting::auto_load: s.auto_load = !s.auto_load; return true;
+        case Setting::sounds: s.sounds = !s.sounds; return true;
+        case Setting::tools: s.tools = !s.tools; return true;
+        case Setting::clear_scratch: return false;
+        case Setting::download_dir: {
+            // Each mounted drive in turn; a missing one counts as before the first.
+            int at = -1;
+            for (int i = 0; i < (int) drives.size(); ++i) {
+                if (drives[(size_t) i].models == s.download_dir) {
+                    at = i;
+                }
+            }
+            const int next = at + dir;
+            if (next < 0 || next >= (int) drives.size()) {
+                return false;
+            }
+            s.download_dir = drives[(size_t) next].models;
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+void Dashboard::update_settings(const hui::InputFrame & input, ui::Feedback & feedback) {
+    const SettingCategory & c = kCategories[setting_category_];
+    if (!in_rows_) {
+        if (input.nav == Direction::up || input.nav == Direction::down) {
+            const int next = setting_category_ + (input.nav == Direction::down ? 1 : -1);
+            if (next >= 0 && next < kCategoryCount) {
+                setting_category_ = next;
+                setting_row_ = 0;
+                feedback.play(hui::audio::Cue::focus, 1.0f + 0.04f * (float) next);
             } else if (!input.nav_repeat) {
                 feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
-                feedback.rumble(0.25f, 0.05f);
-                refusal_.trigger();
-                refusal_x_ = input.nav == Direction::right ? 1.0f : input.nav == Direction::left ? -1.0f : 0.0f;
-                refusal_y_ = input.nav == Direction::down ? 1.0f : input.nav == Direction::up ? -1.0f : 0.0f;
             }
         }
-        if (input.is_pressed(Action::confirm) && focus_ == kModel) {
-            open_library();
-            feedback.play(hui::audio::Cue::open);
+        if (input.nav == Direction::right || input.is_pressed(Action::confirm)) {
+            in_rows_ = true;
+            feedback.play(hui::audio::Cue::select);
+        }
+        return;
+    }
+    if (input.nav == Direction::up || input.nav == Direction::down) {
+        const int next = setting_row_ + (input.nav == Direction::down ? 1 : -1);
+        if (next >= 0 && next < c.count) {
+            setting_row_ = next;
+            feedback.play(hui::audio::Cue::focus, 1.0f + 0.04f * (float) next);
+        } else if (!input.nav_repeat) {
+            feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
         }
     }
-
-    for (int i = 0; i < kTiles; ++i) {
-        lift_[i].target = i == focus_ ? 1.0f : 0.0f;
-        lift_[i].update(dt, 16.0f);
+    const Setting id = c.rows[setting_row_].id;
+    if (id == Setting::clear_scratch) {
+        if (input.is_pressed(Action::confirm)) {
+            request_ = { Request::clear_scratch, "" };
+            feedback.play(hui::audio::Cue::saved);
+        }
+        if (input.is_pressed(Action::back)) {
+            in_rows_ = false;
+            feedback.play(hui::audio::Cue::back);
+        }
+        return;
     }
-    ring_.target(ring_rect());
-    ring_.update(dt, 20.0f);
-    refusal_.update(dt, 9.0f);
-    library_.target = library_open_ ? 1.0f : 0.0f;
-    library_.update(dt, 13.0f);
-    cursor_y_.target = (float) slot(library_cursor_);
-    cursor_y_.update(dt, 20.0f);
+    int dir = 0;
+    if (input.nav == Direction::left || input.nav == Direction::right) {
+        dir = input.nav == Direction::right ? 1 : -1;
+    }
+    if (is_toggle(id) && input.is_pressed(Action::confirm)) {
+        dir = 1;
+    }
+    if (dir != 0) {
+        if (is_toggle(id) && (input.nav == Direction::left || input.nav == Direction::right)) {
+            // Left turns a switch off, right on; the other way refuses.
+            const bool on = toggle_value(settings_, id);
+            if (on == (dir > 0)) {
+                if (!input.nav_repeat) {
+                    feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
+                }
+                dir = 0;
+            }
+        }
+        if (dir != 0 && step_setting(settings_, id, dir, live_.models, live_.drives)) {
+            request_ = { Request::settings, "" };
+            feedback.play(is_toggle(id) ? hui::audio::Cue::toggle : hui::audio::Cue::slider, 1.0f + 0.05f * (float) dir);
+        } else if (dir != 0 && !input.nav_repeat) {
+            feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
+        }
+    }
+    if (input.is_pressed(Action::back)) {
+        in_rows_ = false;
+        feedback.play(hui::audio::Cue::back);
+    }
+}
+
+namespace {
+
+// 2 error, 1 warning, 0 neither. llama.cpp marks its lines " E " and " W ";
+// the rest is matched by words, so "failures=0" is not an error.
+int log_level(const std::string & line) {
+    std::string low = line;
+    std::transform(low.begin(), low.end(), low.begin(), [](unsigned char ch) { return (char) std::tolower(ch); });
+    const auto has = [&](const char * w) { return low.find(w) != std::string::npos; };
+    if (line.find(" E ") != std::string::npos || has("error") || has("failed") || has("exception") || has("fatal") ||
+        has("abort")) {
+        return 2;
+    }
+    if (line.find(" W ") != std::string::npos || has("warn")) {
+        return 1;
+    }
+    return 0;
+}
+
+}  // namespace
+
+// After the space check: ask about a loaded model first, or start.
+void Dashboard::start_download(ui::Feedback & feedback) {
+    if (!live_.model_label.empty() && live_.free_gib < 2.0) {
+        market_confirm_ = true;  // a model holds the memory: ask first
+        feedback.play(hui::audio::Cue::modal_open);
+    } else {
+        request_ = { Request::market_download, market_dir_, market_.open, market_file_ };
+        feedback.play(hui::audio::Cue::complete);
+    }
+}
+
+void Dashboard::update_market(const hui::InputFrame & input, ui::Feedback & feedback) {
+    // The download does not fit where it would go.
+    if (market_space_) {
+        if (input.is_pressed(Action::confirm) && !market_dir_.empty()) {
+            market_space_ = false;
+            start_download(feedback);
+        } else if (input.is_pressed(Action::back)) {
+            market_space_ = false;
+            feedback.play(hui::audio::Cue::back);
+        }
+        return;
+    }
+    // The question before a download while a model holds the memory.
+    if (market_confirm_) {
+        if (input.is_pressed(Action::north)) {
+            request_ = { Request::market_download_unload, market_dir_, market_.open, market_file_ };
+            market_confirm_ = false;
+            feedback.play(hui::audio::Cue::complete);
+        } else if (input.is_pressed(Action::confirm)) {
+            request_ = { Request::market_download, market_dir_, market_.open, market_file_ };
+            market_confirm_ = false;
+            feedback.play(hui::audio::Cue::complete);
+        } else if (input.is_pressed(Action::back)) {
+            market_confirm_ = false;
+            feedback.play(hui::audio::Cue::back);
+        }
+        return;
+    }
+    const int step = input.is_pressed(Action::jump_next) ? 1 : input.is_pressed(Action::jump_prev) ? -1 : 0;
+    if (step != 0) {
+        const int next = market_chip_ + step;
+        if (next >= 0 && next < kMarketChipCount) {
+            market_chip_ = next;
+            market_repo_ = 0;
+            market_files_ = false;
+            request_ = { Request::market_search, next == 0 ? std::string() : std::string(kMarketChips[next]) };
+            feedback.play(hui::audio::Cue::tab);
+        } else {
+            feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
+        }
+        return;
+    }
+    const int repos = (int) market_.repos.size();
+    const MarketRepo * open = market_.open >= 0 && market_.open < repos ? &market_.repos[(size_t) market_.open] : nullptr;
+    const int files = open ? (int) open->files.size() : 0;
+    int & cursor = market_files_ ? market_file_ : market_repo_;
+    const int count = market_files_ ? files : repos;
+    if (input.nav == Direction::up || input.nav == Direction::down) {
+        const int next = cursor + (input.nav == Direction::down ? 1 : -1);
+        if (next >= 0 && next < count) {
+            cursor = next;
+            feedback.play(hui::audio::Cue::focus, 1.0f + 0.02f * (float) next);
+            if (market_files_) {
+                request_ = { Request::market_plan, "", market_.open, cursor };
+            }
+        } else if (!input.nav_repeat) {
+            feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
+        }
+    }
+    if (input.is_pressed(Action::confirm)) {
+        if (!market_files_ && cursor < repos) {
+            request_ = { Request::market_open, "", cursor, -1 };
+            market_files_ = true;
+            market_file_ = 0;
+            feedback.play(hui::audio::Cue::open);
+        } else if (market_files_ && open && cursor < files) {
+            const MarketFile & f = open->files[(size_t) cursor];
+            const double need = f.bytes / 1073741824.0 + 1.0;  // and 1 GiB spare, as Market::download wants
+            const Drive * to = nullptr;
+            const Drive * other = nullptr;  // the roomiest other drive it fits on
+            for (const auto & d : live_.drives) {
+                if (d.models == settings_.download_dir) {
+                    to = &d;
+                } else if (d.free >= need && (!other || d.free > other->free)) {
+                    other = &d;
+                }
+            }
+            market_dir_.clear();
+            if (f.fits == 0) {
+                feedback.play(hui::audio::Cue::error);  // too big
+            } else if (!to || (to->total > 0 && to->free < need)) {  // unknown space (no exporter) does not block
+                market_space_ = true;
+                market_dir_ = other ? other->models : "";
+                feedback.play(hui::audio::Cue::modal_open);
+            } else {
+                start_download(feedback);
+            }
+        }
+    }
+    // Square: read this file's header now and say whether it fits.
+    if (input.is_pressed(Action::west) && market_files_ && open && cursor < files) {
+        const MarketFile & f = open->files[(size_t) cursor];
+        if (f.fits == -1 || f.fits == -2) {
+            request_ = { Request::market_plan, "", market_.open, cursor };
+            feedback.play(hui::audio::Cue::select);
+        } else {
+            feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);  // checked already
+        }
+    }
+    if (input.is_pressed(Action::back) && market_files_) {
+        market_files_ = false;
+        feedback.play(hui::audio::Cue::back);
+    }
+    // The first file of a freshly opened repository gets planned too.
+    if (request_.kind == Request::none && market_files_ && files > 0 && market_file_ == 0 && open->files[0].fits == -1 && !open->files[0].checking &&
+        !market_.busy) {
+        request_ = { Request::market_plan, "", market_.open, 0 };
+    }
+}
+
+void Dashboard::set_logs(std::vector<std::string> app, std::vector<std::string> llama) {
+    app_log_ = std::move(app);
+    llama_log_ = std::move(llama);
+    refilter_logs();
+}
+
+void Dashboard::refilter_logs() {
+    const auto keep = [&](const std::string & line) { return !log_errors_ || log_level(line) > 0; };
+    app_view_.clear();
+    llama_view_.clear();
+    std::copy_if(app_log_.begin(), app_log_.end(), std::back_inserter(app_view_), keep);
+    std::copy_if(llama_log_.begin(), llama_log_.end(), std::back_inserter(llama_view_), keep);
+    log_scroll_ = std::min(log_scroll_, std::max(0, (int) log_view().size() - kLogLines));
+}
+
+void Dashboard::update_logs(const hui::InputFrame & input, ui::Feedback & feedback) {
+    const int most = std::max(0, (int) log_view().size() - kLogLines);
+    if (input.nav == Direction::up || input.nav == Direction::down) {
+        const int next = std::clamp(log_scroll_ + (input.nav == Direction::up ? 3 : -3), 0, most);
+        if (next != log_scroll_) {
+            log_scroll_ = next;
+            feedback.play(hui::audio::Cue::focus, 1.0f, 0.0f, 0.4f);
+        } else if (!input.nav_repeat) {
+            feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
+        }
+    }
+    if (input.is_pressed(Action::west)) {
+        log_llama_ = !log_llama_;
+        log_scroll_ = 0;
+        feedback.play(hui::audio::Cue::select);
+    }
+    if (input.is_pressed(Action::north)) {
+        log_errors_ = !log_errors_;
+        refilter_logs();
+        log_scroll_ = 0;
+        feedback.play(hui::audio::Cue::select);
+    }
+    if (input.is_pressed(Action::confirm)) {
+        log_scroll_ = 0;  // back to the newest
+        feedback.play(hui::audio::Cue::back);
+    }
 }
 
 // ---- drawing helpers -----------------------------------------------------------
@@ -306,6 +836,31 @@ std::string gib(double v) {
     char t[24];
     std::snprintf(t, sizeof(t), "%.1f", v);
     return t;
+}
+
+// "2.1 of 10.4 GiB  ·  3.8 MB/s  ·  37 min left", or the note of one that waits.
+std::string download_line(const Download & d) {
+    char t[200];
+    const double done = d.done / 1073741824.0, all = d.bytes / 1073741824.0;
+    if (d.state == DownloadState::running && d.mbps > 0.05) {
+        const double left_s = (double) (d.bytes - std::min(d.done, d.bytes)) / (d.mbps * 1e6);
+        if (left_s >= 3600) {
+            std::snprintf(t, sizeof(t), "%.1f of %.1f GiB  \xC2\xB7  %.1f MB/s  \xC2\xB7  %.0f h %02.0f min left", done, all,
+                          d.mbps, std::floor(left_s / 3600), std::fmod(left_s / 60, 60));
+        } else {
+            std::snprintf(t, sizeof(t), "%.1f of %.1f GiB  \xC2\xB7  %.1f MB/s  \xC2\xB7  %.0f min left", done, all, d.mbps,
+                          std::ceil(left_s / 60));
+        }
+        return t;
+    }
+    std::snprintf(t, sizeof(t), "%.1f of %.1f GiB", done, all);
+    if (d.state == DownloadState::running) {
+        return std::string(t) + "  \xC2\xB7  starting";
+    }
+    if (!d.note.empty() && d.state != DownloadState::done) {
+        return std::string(t) + "  \xC2\xB7  " + d.note;
+    }
+    return d.state == DownloadState::done ? d.note : d.state == DownloadState::queued ? std::string(t) + "  \xC2\xB7  waiting its turn" : t;
 }
 
 }  // namespace
@@ -379,62 +934,71 @@ void Dashboard::draw_content(gfx::DrawList & list, int tile, const Rect & r, flo
             caps(list, f, "PROMPT", r.x + r.w - kPad - uw - pw - 26, r.y + 352, 15, kInk.with_alpha(kMuted), gfx::Align::right);
             break;
         }
-        case kGpu: {
-            const float gw = number(list, f, serving, "%.0f", L.gpu_busy * 100.0f * up, r.x + kPad, r.y + 118, 60, kInk);
-            ui::text(list, f.regular, "% busy computing", r.x + kPad + gw + 10, r.y + 118, 22, kInk.with_alpha(kMuted));
-            ui::text(list, f.regular, "PlayStation 5 GPU, Vulkan (RADV)", r.x + kPad, r.y + 152, 20, kInk.with_alpha(kFaint));
-            history(list, L.gpu_history, { r.x + kPad, r.y + 186, r.w - 2 * kPad, 90 }, 1.0f, kCyan, t);
+        case kUsage: {
+            // The GPU and the CPU side by side over one chart: cyan the GPU,
+            // lime the app's CPUs.
+            const float half = (r.w - 2 * kPad) * 0.5f;
+            caps(list, f, "GPU", r.x + kPad, r.y + 86, 15, kCyan);
+            caps(list, f, "CPU", r.x + kPad + half, r.y + 86, 15, kLime);
+            float w = number(list, f, serving, "%.0f", L.gpu_busy * 100.0f * up, r.x + kPad, r.y + 140, 52, kInk);
+            ui::text(list, f.regular, "%", r.x + kPad + w + 6, r.y + 140, 22, kInk.with_alpha(kMuted));
+            w = number(list, f, true, "%.0f", L.cpu_use * 100.0f * up, r.x + kPad + half, r.y + 140, 52, kInk);
+            ui::text(list, f.regular, "%", r.x + kPad + half + w + 6, r.y + 140, 22, kInk.with_alpha(kMuted));
+            const Rect g{ r.x + kPad, r.y + 170, r.w - 2 * kPad, 110 };
+            history(list, L.cpu_history, g, 1.0f, kLime, t);
+            history(list, L.gpu_history, g, 1.0f, kCyan, t);
             list.rounded_rect({ r.x + kPad, r.y + 300, r.w - 2 * kPad, 1 }, 0, kInk.with_alpha(0.1f));
-            caps(list, f, "MODEL ON THE GPU", r.x + kPad, r.y + 338, 15, kInk.with_alpha(kMuted));
-            std::snprintf(text, sizeof(text), "%s GiB", gib(L.model_gib + L.kv_gib).c_str());
-            ui::text(list, f.mono, text, r.x + r.w - kPad, r.y + 340, 24, kInk, gfx::Align::right);
+            caps(list, f, "CLOCK", r.x + kPad, r.y + 338, 15, kInk.with_alpha(kMuted));
+            std::snprintf(text, sizeof(text), "%d CPUs, %.1f GHz", L.cpus, L.cpu_ghz);
+            ui::text(list, f.mono, L.cpu_ghz > 0 ? text : kDash, r.x + r.w - kPad, r.y + 340, 22, kInk, gfx::Align::right);
             break;
         }
-        case kCpu: {
-            const float cw = number(list, f, true, "%.0f", L.cpu_use * 100.0f * up, r.x + kPad, r.y + 118, 60, kInk);
-            std::snprintf(text, sizeof(text), "%% of %d CPUs", L.cpus);
-            ui::text(list, f.regular, text, r.x + kPad + cw + 10, r.y + 118, 22, kInk.with_alpha(kMuted));
-            ui::text(list, f.regular, "Zen 2, the app's share", r.x + kPad, r.y + 152, 20, kInk.with_alpha(kFaint));
-            history(list, L.cpu_history, { r.x + kPad, r.y + 186, r.w - 2 * kPad, 90 }, 1.0f, kLime, t);
+        case kPower: {
+            const bool known = L.soc_power_w > 0;
+            const float pw = number(list, f, known, "%.0f", L.soc_power_w * up, r.x + kPad, r.y + 118, 60, kInk);
+            ui::text(list, f.regular, "W, the SoC", r.x + kPad + pw + 10, r.y + 118, 22, kInk.with_alpha(kMuted));
+            if (known && L.state == ServerState::generating && L.gen_tps > 0) {
+                std::snprintf(text, sizeof(text), "%.1f J per token", L.soc_power_w / L.gen_tps);
+            } else if (known) {
+                std::snprintf(text, sizeof(text), "CPU, GPU and memory together");
+            } else {
+                std::snprintf(text, sizeof(text), "Load ps5-exporter to read it");
+            }
+            ui::text(list, f.regular, text, r.x + kPad, r.y + 152, 20, kInk.with_alpha(kFaint));
+            float peak = 60;
+            for (float v : L.power_history) {
+                peak = std::max(peak, v);
+            }
+            history(list, L.power_history, { r.x + kPad, r.y + 186, r.w - 2 * kPad, 90 }, peak * 1.15f,
+                    Color::rgb(0xffd166), t);
             list.rounded_rect({ r.x + kPad, r.y + 300, r.w - 2 * kPad, 1 }, 0, kInk.with_alpha(0.1f));
-            caps(list, f, "CPU HEAP", r.x + kPad, r.y + 338, 15, kInk.with_alpha(kMuted));
-            std::snprintf(text, sizeof(text), "%s GiB", gib(L.heap_gib).c_str());
-            ui::text(list, f.mono, text, r.x + r.w - kPad, r.y + 340, 24, kInk, gfx::Align::right);
+            caps(list, f, "THIS SESSION", r.x + kPad, r.y + 338, 15, kInk.with_alpha(kMuted));
+            number(list, f, L.energy_wh > 0, "%.2f Wh", L.energy_wh, r.x + r.w - kPad, r.y + 340, 22, kInk, gfx::Align::right);
             break;
         }
         case kMemory: {
-            const bool  known = L.pool_gib > 0;
-            const float used  = known ? (float) ((L.pool_gib - L.free_gib) / L.pool_gib) : 0.0f;
-            const float cx = r.cx(), cy = r.y + 178;
-            list.arc(cx, cy, 98, 16, 0.0f, kTau, kInk.with_alpha(0.08f));
-            list.arc(cx, cy, 98, 16, 0.0f, kTau * used * up, kAmber);
-            number(list, f, known, "%.0f%%", used * 100.0f * up, cx, cy + 12, 50, kInk, gfx::Align::center);
-            ui::text(list, f.regular, "in use", cx, cy + 42, 20, kInk.with_alpha(kMuted), gfx::Align::center);
-            std::snprintf(text, sizeof(text), "%s of %s GiB", gib(L.pool_gib - L.free_gib).c_str(), gib(L.pool_gib).c_str());
-            ui::text(list, f.mono, known ? text : kDash, cx, r.y + 330, 24, kInk, gfx::Align::center);
-            ui::text(list, f.regular, "GPU and CPU share this pool", cx, r.y + 360, 18, kInk.with_alpha(kFaint),
-                     gfx::Align::center);
-            break;
-        }
-        case kVram: {
-            // Each part capped at what is in use, so a model still loading
+            // One pool: the GPU and the CPU share the title's direct memory.
+            // Each part is capped at what is in use, so a model still loading
             // never pushes the bar past the pool.
+            const bool   known = L.pool_gib > 0;
             const double used  = std::max(0.0, L.pool_gib - L.free_gib);
             const double model = std::min(L.model_gib, used);
             const double kv    = std::min(L.kv_gib, used - model);
             const double other = used - model - kv;
             const double parts[4] = { model, kv, other, L.free_gib };
             const char * names[4] = { "Model", "KV cache", "Other", "Free" };
-            const Color  colors[4] = { kRose, Color::rgb(0xffa9c4), Color::rgb(0xb48cff), kInk.with_alpha(0.16f) };
-            std::snprintf(text, sizeof(text), "of %s GiB", gib(L.pool_gib).c_str());
+            const Color  colors[4] = { kAmber, Color::rgb(0xffe2a0), Color::rgb(0xb48cff), kInk.with_alpha(0.16f) };
+            std::snprintf(text, sizeof(text), "of %s GiB, GPU and CPU", gib(L.pool_gib).c_str());
             const float w = f.regular.measure(text, 22);
             ui::text(list, f.regular, text, r.x + r.w - kPad, r.y + 50, 22, kInk.with_alpha(kMuted), gfx::Align::right);
-            number(list, f, L.pool_gib > 0, "%.1f", (L.pool_gib - L.free_gib) * up, r.x + r.w - kPad - w - 12, r.y + 50,
-                   34, kInk, gfx::Align::right);
+            const float uw = number(list, f, known, "%.1f", used * up, r.x + r.w - kPad - w - 12, r.y + 50, 34, kInk,
+                                    gfx::Align::right);
+            number(list, f, known, "%.0f%%", (known ? used / L.pool_gib * 100.0 : 0.0) * up,
+                   r.x + r.w - kPad - w - uw - 34, r.y + 50, 34, kAmber, gfx::Align::right);
             const Rect b{ r.x + kPad, r.y + 76, r.w - 2 * kPad, 28 };
             list.rounded_rect(b, 10, kInk.with_alpha(0.05f));
             float x = b.x;
-            for (int k = 0; k < 4 && L.pool_gib > 0; ++k) {
+            for (int k = 0; k < 4 && known; ++k) {
                 const float full = b.w * (float) (parts[k] / L.pool_gib);
                 const float seg  = std::max(0.0f, full * rise(t, k, 0.16f, 0.5f) - 4.0f);
                 if (seg > 1.0f) {
@@ -452,28 +1016,77 @@ void Dashboard::draw_content(gfx::DrawList & list, int tile, const Rect & r, flo
             }
             break;
         }
-        case kSession: {
-            const int s = (int) L.uptime_s;
-            std::snprintf(text, sizeof(text), "%02d:%02d:%02d", s / 3600 % 100, s / 60 % 60, s % 60);
-            ui::text(list, f.mono, text, r.x + kPad, r.y + 104, 40, kInk);
-            std::snprintf(text, sizeof(text), "%llu tokens out, %llu in, %llu replies", (unsigned long long) L.tokens,
-                          (unsigned long long) L.prompt_tokens, (unsigned long long) L.requests);
-            ui::text(list, f.regular, text, r.x + kPad, r.y + 150, 20, kInk.with_alpha(kMuted));
-            break;
-        }
         case kContext: {
+            const int s = (int) L.uptime_s;
             if (L.ctx == 0) {
                 ui::text(list, f.regular, "No model loaded", r.x + kPad, r.y + 104, 26, kInk.with_alpha(kFaint));
-                break;
+            } else {
+                const float share = (float) L.ctx_used / (float) L.ctx;
+                const float w = number(list, f, true, "%.0f", (double) L.ctx_used, r.x + kPad, r.y + 104, 40, kInk);
+                std::snprintf(text, sizeof(text), "of %uk tokens", L.ctx / 1024);
+                ui::text(list, f.regular, text, r.x + kPad + w + 12, r.y + 104, 22, kInk.with_alpha(kMuted));
+                bar(list, { r.x + kPad, r.y + 126, r.w - 2 * kPad, 10 }, share * up, kBrand);
             }
-            const float share = L.ctx ? (float) L.ctx_used / (float) L.ctx : 0.0f;
-            const float w = number(list, f, L.ctx > 0, "%.0f", (double) L.ctx_used, r.x + kPad, r.y + 104, 40, kInk);
-            std::snprintf(text, sizeof(text), "of %uk tokens", L.ctx / 1024);
-            ui::text(list, f.regular, text, r.x + kPad + w + 12, r.y + 104, 22, kInk.with_alpha(kMuted));
-            bar(list, { r.x + kPad, r.y + 126, r.w - 2 * kPad, 10 }, share * up, kAmber);
-            std::snprintf(text, sizeof(text), "%s cache, %s GiB", L.kv_type.empty() ? kDash : L.kv_type.c_str(),
-                          gib(L.kv_gib).c_str());
-            ui::text(list, f.regular, text, r.x + kPad, r.y + 164, 20, kInk.with_alpha(kMuted));
+            char up_text[16];
+            std::snprintf(up_text, sizeof(up_text), "%02d:%02d:%02d", s / 3600 % 100, s / 60 % 60, s % 60);
+            ui::text(list, f.mono, up_text, r.x + r.w - kPad, r.y + kLabelY, 18, kInk.with_alpha(kMuted), gfx::Align::right);
+            std::snprintf(text, sizeof(text), "%llu out  \xC2\xB7  %llu in  \xC2\xB7  %llu replies",
+                          (unsigned long long) L.tokens, (unsigned long long) L.prompt_tokens,
+                          (unsigned long long) L.requests);
+            ui::text(list, f.regular, f.regular.font->fit(text, 18, r.w - 2 * kPad), r.x + kPad, r.y + 164, 18,
+                     kInk.with_alpha(kMuted));
+            break;
+        }
+        case kStorage: {
+            // Internal storage and the first two drives; no drive shows as such.
+            const size_t n = std::min<size_t>(L.drives.size(), 3);
+            for (size_t k = 0; k < n; ++k) {
+                const Drive & d = L.drives[k];
+                const float y = n > 2 ? r.y + 80 + (float) k * 40.0f : r.y + 92 + (float) k * 52.0f;  // three fit tighter
+                caps(list, f, d.name.substr(0, d.name.find(' ')), r.x + kPad, y, 15, kInk.with_alpha(kMuted));
+                if (d.total <= 0) {
+                    ui::text(list, f.regular, kDash, r.x + r.w - kPad, y, 20, kInk.with_alpha(kFaint), gfx::Align::right);
+                    continue;
+                }
+                std::snprintf(text, sizeof(text), "%.0f GiB free", d.free);
+                ui::text(list, f.mono, text, r.x + r.w - kPad, y, 20, kInk, gfx::Align::right);
+                bar(list, { r.x + kPad, y + 14, r.w - 2 * kPad, 8 }, (float) ((d.total - d.free) / d.total) * up, kRose);
+            }
+            if (n == 1) {
+                caps(list, f, "USB / M.2", r.x + kPad, r.y + 144, 15, kInk.with_alpha(kMuted));
+                ui::text(list, f.regular, "No drive", r.x + r.w - kPad, r.y + 144, 20, kInk.with_alpha(kFaint), gfx::Align::right);
+            }
+            break;
+        }
+        case kThermals: {
+            const bool known = L.soc_temp > -100;
+            const float tw = number(list, f, known, "%.0f", L.soc_temp, r.x + kPad, r.y + 118, 60, kInk);
+            ui::text(list, f.regular, "\xC2\xB0" "C, the SoC", r.x + kPad + tw + 10, r.y + 118, 22, kInk.with_alpha(kMuted));
+            if (L.cpu_temp > -100 && L.fan >= 0) {
+                std::snprintf(text, sizeof(text), "CPU %.0f \xC2\xB0" "C  \xC2\xB7  fan %.0f%%", L.cpu_temp, L.fan * 100.0f);
+            } else if (L.cpu_temp > -100) {
+                std::snprintf(text, sizeof(text), "CPU %.0f \xC2\xB0" "C", L.cpu_temp);
+            } else if (!L.sensors_from_exporter) {
+                std::snprintf(text, sizeof(text), "Load ps5-exporter to read them");
+            } else {
+                std::snprintf(text, sizeof(text), "No sensor answered");
+            }
+            ui::text(list, f.regular, text, r.x + kPad, r.y + 152, 20, kInk.with_alpha(kFaint));
+            history(list, L.temp_history, { r.x + kPad, r.y + 186, r.w - 2 * kPad, 90 }, 100.0f, kHeat, t);
+            list.rounded_rect({ r.x + kPad, r.y + 300, r.w - 2 * kPad, 1 }, 0, kInk.with_alpha(0.1f));
+            // The hottest sensor, so a hot spot shows without opening POWER.
+            const std::pair<std::string, float> * hot = nullptr;
+            for (const auto & tp : L.temps) {
+                if (!hot || tp.second > hot->second) {
+                    hot = &tp;
+                }
+            }
+            caps(list, f, "HOTTEST", r.x + kPad, r.y + 338, 15, kInk.with_alpha(kMuted));
+            if (hot) {
+                const std::string who = hot->first == "cpu" ? std::string("CPU") : "SoC " + hot->first.substr(3);
+                std::snprintf(text, sizeof(text), "%s, %.0f \xC2\xB0" "C", who.c_str(), hot->second);
+            }
+            ui::text(list, f.mono, hot ? text : kDash, r.x + r.w - kPad, r.y + 340, 22, kInk, gfx::Align::right);
             break;
         }
         default: {  // kModel
@@ -536,8 +1149,9 @@ void Dashboard::draw_header(gfx::DrawList & list) const {
     const float in = tween::stagger(age_, 0, 0.05f, 0.5f);
     list.push_opacity(in);
     const float y = 124 - 10.0f * (1.0f - in);
-    const float w = ui::text(list, fonts_.display, "PS5LM", kGridX - 3, y, 56, kInk);
-    std::string sub = "Chat at " + live_.address;
+    float       w = ui::text(list, fonts_.display, "PS5LM", kGridX - 3, y, 56, kInk);
+    w += ui::text(list, fonts_.display, " Plus", kGridX - 3 + w, y, 56, kBrand);
+    std::string sub = "v" PS5LM_VERSION "  \xC2\xB7  " + live_.address;
     ui::text(list, fonts_.regular, sub, kGridX + w + 24, y, 24, kInk.with_alpha(kMuted));
 
     const char * word  = state_word(live_.state);
@@ -588,12 +1202,16 @@ void Dashboard::draw_library(gfx::DrawList & list, std::uint32_t glass) const {
     for (int i = 0; i < rows; ++i) {
         const ModelRow & m = live_.models[(size_t) i];
         const int   s = slot(i);
-        if (i == 0 || m.on_usb != live_.models[(size_t) i - 1].on_usb) {
+        if (i == 0 || m.drive != live_.models[(size_t) i - 1].drive) {
             const int h = s - 1;
             if (h >= first && h < first + 8) {
                 const float hy = top + (float) (h - first) * kRowH;
-                caps(list, f, m.on_usb ? "USB DRIVE" : "INTERNAL STORAGE", panel.x + 60, hy + 50, 16,
-                     m.on_usb ? kAmber : kCyan);
+                std::string head = m.drive.empty() ? "OTHER" : m.drive;
+                for (char & c : head) {
+                    c = (char) std::toupper((unsigned char) c);
+                }
+                const bool internal = m.drive.rfind("Internal", 0) == 0;
+                caps(list, f, head, panel.x + 60, hy + 50, 16, internal ? kCyan : kAmber);
                 list.rounded_rect({ panel.x + 60, hy + 62, panel.w - 120, 1 }, 0, kInk.with_alpha(0.12f));
             }
         }
@@ -629,14 +1247,670 @@ void Dashboard::open_library() {
     cursor_y_.snap((float) slot(library_cursor_));
 }
 
-// Rows come sorted by path, so internal (/data) ones precede USB (/mnt) ones;
-// each group gets a header line above it.
+// Rows come sorted by path, so they group by drive (/data, then /mnt/ext0,
+// /mnt/usb0...); each group gets a header line above it.
 int Dashboard::slot(int row) const {
     int s = row + 1;
-    if (row > 0 && live_.models[(size_t) row].on_usb && !live_.models[0].on_usb) {
-        ++s;
+    for (int i = 1; i <= row; ++i) {
+        s += live_.models[(size_t) i].drive != live_.models[(size_t) i - 1].drive;
     }
     return s;
+}
+
+void Dashboard::draw_tabs(gfx::DrawList & list) const {
+    // Left of the state chip: L1, the three page names, R1. The active name
+    // is lit and underlined; the underline glides between names.
+    const ui::Fonts & f = fonts_;
+    const char * word = state_word(live_.state);
+    const float chip_w = 70.0f + f.semibold.measure(word, 17) + 3.0f * (float) std::char_traits<char>::length(word);
+    float x = kGridX + kGridW - chip_w - 40;
+    const ui::GlyphStyle style = ui::GlyphStyle::dark();
+    const float in = tween::stagger(age_, 1, 0.05f, 0.5f);
+    list.push_opacity(in);
+    x -= ui::button_width(ui::Button::r1, 26);
+    ui::draw_button(list, f, style, ui::Button::r1, x, 106, 26);
+    std::array<float, kPages> xs{}, ws{};
+    for (int i = kPages - 1; i >= 0; --i) {
+        ws[(size_t) i] = f.semibold.measure(kPageNames[i], 22);
+        x -= 28 + ws[(size_t) i];
+        xs[(size_t) i] = x;
+        ui::text(list, i == page_ ? f.semibold : f.regular, kPageNames[i], x, 114, 22,
+                 kInk.with_alpha(i == page_ ? 1.0f : kMuted));
+    }
+    x -= 16 + ui::button_width(ui::Button::l1, 26);
+    ui::draw_button(list, f, style, ui::Button::l1, x, 106, 26);
+    const float t = tween::cubic_out(tween::clamp01(page_age_ / 0.3f));
+    const float ux = xs[(size_t) page_from_] + (xs[(size_t) page_] - xs[(size_t) page_from_]) * t;
+    const float uw = ws[(size_t) page_from_] + (ws[(size_t) page_] - ws[(size_t) page_from_]) * t;
+    list.rounded_rect({ ux, 128, uw, 3 }, 1.5f, kCyan);
+    list.pop_opacity();
+}
+
+namespace {
+
+// llama-server's arguments as flag and value pairs, one per line.
+std::vector<std::string> arg_lines(const std::vector<std::string> & args) {
+    std::vector<std::string> out;
+    for (size_t i = 0; i < args.size(); ++i) {
+        std::string line = args[i];
+        const bool flag = line.size() > 1 && line[0] == '-' && !std::isdigit((unsigned char) line[1]);
+        if (flag && i + 1 < args.size()) {
+            const std::string & v = args[i + 1];
+            if (!(v.size() > 1 && v[0] == '-' && !std::isdigit((unsigned char) v[1]))) {
+                line += " " + v;
+                ++i;
+            }
+        }
+        out.push_back(line);
+    }
+    return out;
+}
+
+}  // namespace
+
+void Dashboard::draw_details(gfx::DrawList & list, std::uint32_t glass) const {
+    const float t = details_.value;
+    if (t <= 0.01f) {
+        return;
+    }
+    const ui::Fonts & f = fonts_;
+    const Live & L = live_;
+    Rect panel = kLibrary;
+    panel.y += 30.0f * (1.0f - t);
+    list.push_opacity(t);
+    list.shadow({ panel.x, panel.y + 20, panel.w, panel.h }, 40, 50, kBlack.with_alpha(0.55f));
+    if (glass) {
+        list.glass(glass, panel, 40, Color::rgb(0xffffff));
+    }
+    if (detail_tile_ == kUsage || detail_tile_ == kPower) {
+        draw_panel(list, panel, 40, 1.0f, accent_of(detail_tile_));
+        if (detail_tile_ == kUsage) {
+            draw_usage_details(list, panel);
+        } else {
+            draw_power_details(list, panel);
+        }
+        list.pop_opacity();
+        return;
+    }
+    draw_panel(list, panel, 40, 1.0f, kLime);
+    caps(list, f, "LOADED MODEL", panel.x + 56, panel.y + 60, 20, kLime);
+    ui::text(list, f.semibold, f.semibold.font->fit(L.preset.empty() ? L.model_label : L.preset, 40, panel.w - 112),
+             panel.x + 56, panel.y + 116, 40, kInk);
+    ui::text(list, f.regular, f.regular.font->fit(L.model_file, 20, panel.w - 112), panel.x + 56, panel.y + 150, 20,
+             kInk.with_alpha(kMuted));
+
+    // Left: the facts. Right: every argument llama-server got.
+    char text[96];
+    std::snprintf(text, sizeof(text), "%s GiB", gib(L.model_gib).c_str());
+    std::string ctx = L.ctx ? std::to_string(L.ctx / 1024) + "k tokens" : std::string(kDash);
+    std::string cache = L.kv_type.empty() ? std::string(kDash) : L.kv_type + ", " + gib(L.kv_gib) + " GiB";
+    const std::string facts[][2] = {
+        { "SIZE", text },
+        { "ARCHITECTURE", L.model_arch.empty() ? std::string(kDash) : L.model_arch },
+        { "CONTEXT", ctx },
+        { "KV CACHE", cache },
+        { "PRESET", L.preset.empty() ? std::string("None") : L.preset },
+    };
+    const float lx = panel.x + 56, lw = 400;
+    for (int k = 0; k < 5; ++k) {
+        const float y = panel.y + 220 + k * 62.0f;
+        caps(list, f, facts[k][0], lx, y, 15, kInk.with_alpha(kMuted));
+        ui::text(list, f.mono, f.mono.font->fit(facts[k][1], 24, lw), lx, y + 32, 24, kInk);
+    }
+    caps(list, f, "PLAN", lx, panel.y + 548, 15, kInk.with_alpha(kMuted));
+    ui::paragraph(list, f.regular, L.plan.empty() ? std::string("Set by app-args.txt") : L.plan, lx, panel.y + 580, 20,
+                  lw, 28, kInk.with_alpha(0.85f), 3);
+
+    const float ax = panel.x + 520, aw = panel.w - 520 - 56;
+    list.rounded_rect({ ax - 32, panel.y + 196, 1, panel.h - 260 }, 0, kInk.with_alpha(0.1f));
+    caps(list, f, "ARGUMENTS", ax, panel.y + 220, 15, kInk.with_alpha(kMuted));
+    const auto lines = arg_lines(L.args);
+    const int  per_column = 17;
+    const float col_w = lines.size() > (size_t) per_column ? aw * 0.5f : aw;
+    for (size_t i = 0; i < lines.size() && i < (size_t) per_column * 2; ++i) {
+        const float x = ax + (float) (i / per_column) * col_w;
+        const float y = panel.y + 256 + (float) (i % per_column) * 30.0f;
+        ui::text(list, f.mono, f.mono.font->fit(lines[i], 18, col_w - 16), x, y, 18, kInk.with_alpha(0.9f));
+    }
+    list.pop_opacity();
+}
+
+// Everything the console is doing, one section each.
+void Dashboard::draw_usage_details(gfx::DrawList & list, const Rect & panel) const {
+    const ui::Fonts & f = fonts_;
+    const Live & L = live_;
+    const bool serving = L.state == ServerState::ready || L.state == ServerState::generating;
+    char text[96];
+    caps(list, f, "USAGE", panel.x + 56, panel.y + 60, 20, kCyan);
+    ui::text(list, f.regular, "What the console is doing for PS5LM Plus, over the last two minutes.", panel.x + 56,
+             panel.y + 96, 20, kInk.with_alpha(kMuted));
+
+    const float x0 = panel.x + 56, colw = (panel.w - 112 - 48) * 0.5f, x1 = x0 + colw + 48;
+    // GPU and CPU, each with its chart.
+    const struct {
+        const char * name;
+        Color        c;
+        float        now;
+        bool         known;
+        const std::vector<float> * hist;
+        std::string  sub;
+        float        x;
+    } parts[2] = {
+        { "GPU", kCyan, L.gpu_busy, serving, &L.gpu_history,
+          "Vulkan (RADV), " + gib(L.model_gib + L.kv_gib) + " GiB on it", x0 },
+        { "CPU", kLime, L.cpu_use, true, &L.cpu_history,
+          std::to_string(L.cpus) + " CPUs" + (L.cpu_ghz > 0 ? ", " + gib(L.cpu_ghz) + " GHz" : std::string()) +
+              ", heap " + gib(L.heap_gib) + " GiB",
+          x1 },
+    };
+    for (const auto & p : parts) {
+        caps(list, f, p.name, p.x, panel.y + 160, 16, p.c);
+        const float w = number(list, f, p.known, "%.0f", p.now * 100.0f, p.x, panel.y + 222, 56, kInk);
+        ui::text(list, f.regular, "% busy", p.x + w + 10, panel.y + 222, 22, kInk.with_alpha(kMuted));
+        ui::text(list, f.regular, f.regular.font->fit(p.sub, 20, colw), p.x, panel.y + 256, 20, kInk.with_alpha(kFaint));
+        history(list, *p.hist, { p.x, panel.y + 280, colw, 150 }, 1.0f, p.c, 10.0f);
+    }
+
+    // Memory and storage.
+    list.rounded_rect({ x0, panel.y + 470, panel.w - 112, 1 }, 0, kInk.with_alpha(0.1f));
+    caps(list, f, "MEMORY", x0, panel.y + 514, 16, kAmber);
+    const double used = std::max(0.0, L.pool_gib - L.free_gib);
+    std::snprintf(text, sizeof(text), "%s of %s GiB, GPU and CPU", gib(used).c_str(), gib(L.pool_gib).c_str());
+    ui::text(list, f.mono, text, x0 + colw, panel.y + 514, 20, kInk, gfx::Align::right);
+    bar(list, { x0, panel.y + 534, colw, 12 }, L.pool_gib > 0 ? (float) (used / L.pool_gib) : 0.0f, kAmber);
+
+    caps(list, f, "STORAGE", x1, panel.y + 514, 16, kRose);
+    const size_t n = std::min<size_t>(L.drives.size(), 3);
+    for (size_t k = 0; k < n; ++k) {
+        const Drive & d = L.drives[k];
+        const float y = panel.y + 570 + (float) k * 56.0f;
+        ui::text(list, f.regular, d.name, x1, y, 20, kInk.with_alpha(0.85f));
+        if (d.total <= 0) {
+            ui::text(list, f.regular, kDash, x1 + colw, y, 20, kInk.with_alpha(kFaint), gfx::Align::right);
+            continue;
+        }
+        std::snprintf(text, sizeof(text), "%.0f of %.0f GiB free", d.free, d.total);
+        ui::text(list, f.mono, text, x1 + colw, y, 20, kInk, gfx::Align::right);
+        bar(list, { x1, y + 16, colw, 10 }, (float) ((d.total - d.free) / d.total), kRose);
+    }
+    if (n == 1) {
+        ui::text(list, f.regular, "USB or M.2", x1, panel.y + 626, 20, kInk.with_alpha(0.85f));
+        ui::text(list, f.regular, "No drive", x1 + colw, panel.y + 626, 20, kInk.with_alpha(kFaint), gfx::Align::right);
+    }
+    caps(list, f, "MODELS", x0, panel.y + 610, 16, kInk.with_alpha(kMuted));
+    double on_disk = 0;
+    for (const auto & m : L.models) {
+        on_disk += m.size_gib;
+    }
+    std::snprintf(text, sizeof(text), "%zu found, %s GiB", L.models.size(), gib(on_disk).c_str());
+    ui::text(list, f.mono, text, x0 + colw, panel.y + 610, 20, kInk, gfx::Align::right);
+}
+
+// The SoC's power, the energy it took, and every temperature it reports.
+void Dashboard::draw_power_details(gfx::DrawList & list, const Rect & panel) const {
+    const ui::Fonts & f = fonts_;
+    const Live & L = live_;
+    const Color kGold = Color::rgb(0xffd166);
+    char text[96];
+    caps(list, f, "POWER", panel.x + 56, panel.y + 60, 20, kGold);
+    ui::text(list, f.regular, "The SoC's own reading: CPU, GPU and memory together.", panel.x + 56, panel.y + 96, 20,
+             kInk.with_alpha(kMuted));
+
+    const float x0 = panel.x + 56, lw = 640, x1 = x0 + lw + 64, rw = panel.x + panel.w - 56 - x1;
+    const float w = number(list, f, L.soc_power_w > 0, "%.0f", L.soc_power_w, x0, panel.y + 200, 72, kInk);
+    ui::text(list, f.regular, "W now", x0 + w + 12, panel.y + 200, 24, kInk.with_alpha(kMuted));
+    float mn = 1e9f, mx = 0, sum = 0;
+    for (float v : L.power_history) {
+        mn = std::min(mn, v);
+        mx = std::max(mx, v);
+        sum += v;
+    }
+    const size_t n = L.power_history.size();
+    history(list, L.power_history, { x0, panel.y + 236, lw, 200 }, std::max(60.0f, mx * 1.15f), kGold, 10.0f);
+    const char * names[3] = { "MIN", "AVG", "MAX" };
+    const float  vals[3] = { n ? mn : 0, n ? sum / (float) n : 0, mx };
+    for (int k = 0; k < 3; ++k) {
+        const float x = x0 + k * 190.0f;
+        caps(list, f, names[k], x, panel.y + 486, 15, kInk.with_alpha(kMuted));
+        number(list, f, n > 0, "%.0f W", vals[k], x + 56, panel.y + 488, 24, kInk);
+    }
+    const struct {
+        const char * name;
+        std::string  value;
+    } rows[3] = {
+        { "THIS SESSION", [&] { char t[24]; std::snprintf(t, sizeof(t), "%.2f Wh", L.energy_wh); return std::string(t); }() },
+        { "PER TOKEN", L.gen_tps > 0 && L.soc_power_w > 0 ? gib(L.soc_power_w / L.gen_tps) + " J while generating"
+                                                          : std::string(kDash) },
+        { "FAN", L.fan >= 0 ? std::to_string((int) (L.fan * 100.0f + 0.5f)) + "% duty" : std::string(kDash) },
+    };
+    for (int k = 0; k < 3; ++k) {
+        const float y = panel.y + 556 + k * 50.0f;
+        caps(list, f, rows[k].name, x0, y, 15, kInk.with_alpha(kMuted));
+        ui::text(list, f.mono, rows[k].value, x0 + lw, y + 2, 22, kInk, gfx::Align::right);
+    }
+
+    // Every sensor, hottest first by bar length.
+    list.rounded_rect({ x1 - 32, panel.y + 150, 1, panel.h - 220 }, 0, kInk.with_alpha(0.1f));
+    caps(list, f, "TEMPERATURES", x1, panel.y + 160, 15, kHeat);
+    if (L.temps.empty()) {
+        ui::text(list, f.regular, "No sensor answered", x1, panel.y + 200, 20, kInk.with_alpha(kFaint));
+    }
+    for (size_t k = 0; k < L.temps.size() && k < 12; ++k) {
+        const float y = panel.y + 204 + (float) k * 40.0f;
+        std::string name = L.temps[k].first;
+        if (name == "cpu") {
+            name = "CPU";
+        } else {
+            name = "SoC " + name.substr(3);
+        }
+        ui::text(list, f.regular, name, x1, y, 20, kInk.with_alpha(0.85f));
+        std::snprintf(text, sizeof(text), "%.0f \xC2\xB0" "C", L.temps[k].second);
+        ui::text(list, f.mono, text, x1 + rw, y, 20, kInk, gfx::Align::right);
+        bar(list, { x1 + 90, y - 8, rw - 180, 6 }, L.temps[k].second / 100.0f, kHeat);
+    }
+    ui::paragraph(list, f.regular,
+                  "The console reports the SoC's total only. CPU and GPU power apart, and voltages, are not available to "
+                  "homebrew.",
+                  x0, panel.y + panel.h - 52, 17, panel.w - 112, 24, kInk.with_alpha(kFaint), 2);
+}
+
+void Dashboard::draw_settings(gfx::DrawList & list) const {
+    const ui::Fonts & f = fonts_;
+    const SettingCategory & c = kCategories[setting_category_];
+    const float in = tween::cubic_out(tween::clamp01(page_age_ / 0.35f));
+
+    // The rail: a quiet plate marks the active category even while the focus
+    // is on the rows.
+    list.rounded_rect(rail_rect(setting_category_), 18, kInk.with_alpha(0.06f));
+    draw_panel(list, kSettingsPanel, kRadius, 0.0f, kBrand);
+
+    // The one focus rectangle, travelling between the rail and the rows.
+    const Rect focus = setting_focus_.value();
+    const float breath = ui::breathe(clock_);
+    list.shadow({ focus.x, focus.y + 10, focus.w, focus.h }, 18, 24, kBlack.with_alpha(0.4f));
+    list.glow(focus, 18, 18, kCyan.with_alpha(0.14f + 0.1f * breath));
+    list.rounded_rect(focus, 18, gfx::mix(kPanelTop, kCyan, 0.17f));
+    list.bordered_rect(focus, 18, kClear, 2.0f, kCyan);
+
+    for (int i = 0; i < kCategoryCount; ++i) {
+        const Rect r = rail_rect(i);
+        const bool active = i == setting_category_;
+        const float x = r.x - 28.0f * (1.0f - tween::stagger(page_age_, i, 0.05f, 0.4f));
+        ui::text(list, active ? f.semibold : f.regular, kCategories[i].name, x + 40, r.cy() + 10, 28,
+                 kInk.with_alpha(active ? 1.0f : 0.68f));
+    }
+    list.rounded_rect({ kRailX + 8, rail_rect(setting_category_).y + 20, 4, kRailH - 40 }, 2, kCyan);
+
+    caps(list, f, ui::upper(c.name), kSettingsPanel.x + 48, kSettingsPanel.y + 56, 18, kBrand);
+    ui::text(list, f.regular, c.about, kSettingsPanel.x + 48, kSettingsPanel.y + 90, 22, kInk.with_alpha(kMuted));
+    for (int i = 0; i < c.count; ++i) {
+        const Rect r = setting_rect(i);
+        const bool focused = in_rows_ && i == setting_row_;
+        const float y = r.y + 16.0f * (1.0f - tween::stagger(page_age_, i + 1, 0.06f, 0.4f));
+        const Rect row{ r.x, y, r.w, r.h };
+        if (!focused) {
+            list.rounded_rect(row, 18, kInk.with_alpha(0.035f));
+        }
+        const SettingRow & sr = c.rows[i];
+        ui::text(list, focused ? f.semibold : f.regular, sr.label, row.x + 28, row.cy() + 10, 28,
+                 kInk.with_alpha(focused ? 1.0f : 0.84f));
+        const float right = row.x + row.w - 28;
+        if (is_toggle(sr.id)) {
+            const bool on = toggle_value(settings_, sr.id);
+            const Rect pill{ right - 84, row.cy() - 22, 84, 44 };
+            if (focused) {
+                list.glow(pill, 22, 12, kCyan.with_alpha(on ? 0.45f : 0.18f));
+            }
+            list.bordered_rect(pill, 22, on ? kCyan : Color::rgb(0x2a3550), 1.5f, on ? kCyan : kInk.with_alpha(0.3f));
+            const Rect thumb{ on ? pill.x + pill.w - 39 : pill.x + 5, pill.cy() - 17, 34, 34 };
+            list.shadow({ thumb.x, thumb.y + 2, thumb.w, thumb.h }, 17, 8, kBlack.with_alpha(0.45f));
+            list.rounded_rect(thumb, 17, on ? kPanelBottom : kInk);
+            ui::text(list, f.regular, on ? "On" : "Off", pill.x - 20, row.cy() + 8, 24,
+                     kInk.with_alpha(focused ? 0.95f : 0.66f), gfx::Align::right);
+        } else if (sr.id == Setting::clear_scratch) {
+            // An action row: what it would delete, and a chevron.
+            char t[48];
+            std::snprintf(t, sizeof(t), "%.2f GiB in the folder", live_.scratch_gib);
+            ui::text(list, f.regular, t, right - 34, row.cy() + 8, 24, kInk.with_alpha(focused ? 0.8f : 0.55f),
+                     gfx::Align::right);
+            const Color ink = focused ? kRose : kInk.with_alpha(0.6f);
+            list.line(right - 12, row.cy() - 9, right - 3, row.cy(), 3.0f, ink);
+            list.line(right - 12, row.cy() + 9, right - 3, row.cy(), 3.0f, ink);
+        } else {
+            // A stepper: the value between two triangles, dimmed at the ends.
+            const float w = 420, cx = right - w * 0.5f;
+            if (focused) {
+                list.rounded_rect({ cx - w * 0.5f + 34, row.cy() - 24, w - 68, 48 }, 14, kBlack.with_alpha(0.25f));
+            }
+            const std::string v = setting_text(settings_, sr.id, live_.models, live_.drives);
+            ui::text(list, f.semibold, f.semibold.font->fit(v, 26, w - 100), cx, row.cy() + 9, 26,
+                     focused ? kInk : kInk.with_alpha(0.84f), gfx::Align::center);
+            Settings probe = settings_;
+            const bool left_ok = step_setting(probe, sr.id, -1, live_.models, live_.drives);
+            probe = settings_;
+            const bool right_ok = step_setting(probe, sr.id, 1, live_.models, live_.drives);
+            const Color tint = focused ? kCyan : kInk;
+            const float rest = focused ? 1.0f : 0.5f;
+            ui::text(list, f.mono, "\xE2\x97\x80", cx - w * 0.5f + 12, row.cy() + 10, 30,
+                     tint.with_alpha(left_ok ? rest : 0.16f), gfx::Align::center);
+            ui::text(list, f.mono, "\xE2\x96\xB6", cx + w * 0.5f - 12, row.cy() + 10, 30,
+                     tint.with_alpha(right_ok ? rest : 0.16f), gfx::Align::center);
+        }
+    }
+    // The focused row's help under a hairline at the foot of the panel.
+    const float foot = kSettingsPanel.y + kSettingsPanel.h - 84;
+    list.rounded_rect({ kSettingsPanel.x + 24, foot, kSettingsPanel.w - 48, 1.5f }, 0, kInk.with_alpha(0.1f));
+    const char * help = in_rows_ ? c.rows[setting_row_].help : "Changes are saved at once, to /data/PS5LM/settings.json.";
+    ui::text(list, f.regular, help, kSettingsPanel.x + 48, foot + 50, 22, kInk.with_alpha(kMuted * in));
+}
+
+// Two panes in the Logs page's frame: the repositories of the search on the
+// left, the open one's GGUF files on the right with whether each fits.
+void Dashboard::draw_market(gfx::DrawList & list) const {
+    const ui::Fonts & f = fonts_;
+    const Rect & p = kLogPanel;
+    const MarketView & M = market_;
+    draw_panel(list, p, kRadius, 0.0f, kLime);
+    // The searches as chips; L2/R2 move between them.
+    float x = p.x + kPad;
+    for (int k = 0; k < kMarketChipCount; ++k) {
+        const bool on = k == market_chip_;
+        const float w = f.semibold.measure(kMarketChips[k], 18) + 40;
+        const Rect chip{ x, p.y + 22, w, 38 };
+        list.bordered_rect(chip, 19, on ? kLime.with_alpha(0.16f) : kClear, 1.5f, on ? kLime : kInk.with_alpha(0.16f));
+        ui::text(list, on ? f.semibold : f.regular, kMarketChips[k], chip.cx(), chip.cy() + 7, 18,
+                 on ? kInk : kInk.with_alpha(kMuted), gfx::Align::center);
+        x += w + 12;
+    }
+    const char * status = M.busy ? "Working" : M.status.c_str();
+    ui::text(list, f.regular, f.regular.font->fit(status, 20, 420), p.x + p.w - kPad, p.y + 48, 20,
+             kInk.with_alpha(kMuted), gfx::Align::right);
+    list.rounded_rect({ p.x + kPad, p.y + 76, p.w - 2 * kPad, 1 }, 0, kInk.with_alpha(0.1f));
+
+    const float lx = p.x + kPad, lw = 620, rx = lx + lw + 40, rw = p.x + p.w - kPad - rx, top = p.y + 96;
+    list.rounded_rect({ rx - 20, top, 1, kMarketRows * kMarketRowH }, 0, kInk.with_alpha(0.1f));
+    char text[256];
+    // Repositories.
+    const int repos = (int) M.repos.size();
+    const int rfirst = std::max(0, market_repo_ - (kMarketRows - 1));
+    for (int i = rfirst; i < repos && i < rfirst + kMarketRows; ++i) {
+        const MarketRepo & r = M.repos[(size_t) i];
+        const float y = top + (float) (i - rfirst) * kMarketRowH;
+        const bool cur = i == market_repo_;
+        if (cur) {
+            const Color c = market_files_ ? kInk.with_alpha(0.08f) : kLime.with_alpha(0.12f);
+            list.bordered_rect({ lx - 8, y, lw + 16, kMarketRowH - 8 }, 14, c, 2.0f,
+                               market_files_ ? kInk.with_alpha(0.2f) : kLime.with_alpha(0.7f));
+        }
+        ui::text(list, cur ? f.semibold : f.regular, f.regular.font->fit(r.id, 22, lw - 150), lx + 12, y + 37, 22,
+                 kInk.with_alpha(cur ? 1.0f : 0.85f));
+        std::snprintf(text, sizeof(text), "%.1fk", r.downloads / 1000.0);
+        ui::text(list, f.mono, text, lx + lw - 8, y + 37, 18, kInk.with_alpha(kMuted), gfx::Align::right);
+    }
+    if (repos == 0) {
+        ui::text(list, f.regular, M.busy ? "Searching Hugging Face" : "No repositories", lx + 12, top + 40, 22,
+                 kInk.with_alpha(kFaint));
+    }
+
+    // The open repository's files.
+    const MarketRepo * open = M.open >= 0 && M.open < repos ? &M.repos[(size_t) M.open] : nullptr;
+    if (!open) {
+        ui::paragraph(list, f.regular, "Cross opens a repository: its GGUF files, their sizes, and the context each would get on this console.",
+                      rx, top + 40, 22, rw, 32, kInk.with_alpha(kFaint), 3);
+    } else {
+        ui::text(list, f.semibold, f.semibold.font->fit(open->id, 22, rw), rx, top + 4, 22, kLime);
+        const int files = (int) open->files.size();
+        const int ffirst = std::max(0, market_file_ - (kMarketRows - 2));
+        for (int i = ffirst; i < files && i < ffirst + kMarketRows - 1; ++i) {
+            const MarketFile & mf = open->files[(size_t) i];
+            const float y = top + 26 + (float) (i - ffirst) * kMarketRowH;
+            const bool cur = market_files_ && i == market_file_;
+            if (cur) {
+                list.bordered_rect({ rx - 8, y, rw + 16, kMarketRowH - 8 }, 14, kLime.with_alpha(0.12f), 2.0f,
+                                   kLime.with_alpha(0.7f));
+            }
+            const size_t slash = mf.name.find_last_of('/');
+            const std::string short_name = mf.name.substr(slash == std::string::npos ? 0 : slash + 1);
+            ui::text(list, cur ? f.semibold : f.regular, f.regular.font->fit(short_name, 20, rw - 270), rx + 12, y + 26,
+                     20, kInk.with_alpha(mf.fits == 0 ? 0.45f : 1.0f));
+            ui::text(list, f.regular, f.regular.font->fit(mf.checking ? std::string("Reading its header to plan the context it would get") : mf.plan.empty() ? std::string("Not checked yet: Square checks whether it fits") : mf.plan, 16, rw - 270),
+                     rx + 12, y + 50, 16, kInk.with_alpha(kFaint));
+            std::snprintf(text, sizeof(text), "%.1f GiB", mf.bytes / 1073741824.0);
+            ui::text(list, f.mono, text, rx + rw - 150, y + 36, 18, kInk.with_alpha(0.85f), gfx::Align::right);
+            const char * tag = mf.checking ? "CHECKING" : mf.fits == 1 ? "FITS" : mf.fits == 0 ? "TOO BIG" : mf.fits == -2 ? "UNKNOWN" : "UNCHECKED";
+            const Color  tc  = mf.fits == 1 ? kLime : mf.fits == 0 ? kRose : kInk.with_alpha(kMuted);
+            caps(list, f, tag, rx + rw - 8, y + 36, 14, tc, gfx::Align::right);
+        }
+    }
+
+    // A question over the lists: a title, a headline, a paragraph, buttons.
+    const auto dialog = [&](Color c, const char * title, const std::string & head, const char * body, const ui::Hint * hints,
+                            int n) {
+        const Rect d{ p.cx() - 430, p.cy() - 150, 860, 300 };
+        list.rounded_rect(p, kRadius, kBlack.with_alpha(0.55f));  // a scrim over the lists
+        list.shadow({ d.x, d.y + 18, d.w, d.h }, 28, 40, kBlack.with_alpha(0.6f));
+        draw_panel(list, d, 28, 1.0f, c);
+        caps(list, f, title, d.x + 44, d.y + 56, 18, c);
+        ui::text(list, f.semibold, f.semibold.font->fit(head, 24, d.w - 88), d.x + 44, d.y + 104, 24, kInk);
+        ui::paragraph(list, f.regular, body, d.x + 44, d.y + 144, 21, d.w - 88, 30, kInk.with_alpha(kMuted), 3);
+        ui::HintLayout layout;
+        layout.size = 34.0f;
+        layout.text_size = 22.0f;
+        layout.cy = d.y + d.h - 40;
+        layout.item_gap = 32.0f;
+        ui::draw_hints(list, fonts_, ui::GlyphStyle::dark(), hints, n, d.x + d.w - 44, true, layout);
+    };
+    // The download does not fit where it would go.
+    if (market_space_ && open && market_file_ < (int) open->files.size()) {
+        const MarketFile & mf = open->files[(size_t) market_file_];
+        const Drive * to = nullptr;
+        const Drive * other = nullptr;
+        for (const auto & d : live_.drives) {
+            to = d.models == settings_.download_dir ? &d : to;
+            other = d.models == market_dir_ ? &d : other;
+        }
+        char head[160];
+        std::snprintf(head, sizeof(head), "%s needs %.1f GiB.", mf.name.c_str(), mf.bytes / 1073741824.0);
+        char where[96];
+        if (to) {
+            std::snprintf(where, sizeof(where), "%s has %.1f GiB free", to->name.c_str(), to->free);
+        } else {
+            std::snprintf(where, sizeof(where), "The drive in Settings is not connected");
+        }
+        if (other) {
+            std::snprintf(text, sizeof(text), "%s, and 1 GiB stays spare. %s has %.0f GiB free; this one download can go "
+                          "there. Download to in Settings keeps the default.", where, other->name.c_str(), other->free);
+        } else {
+            std::snprintf(text, sizeof(text), "%s, and 1 GiB stays spare. No other drive has room: free some space, or "
+                          "connect a USB drive or an M.2 drive.", where);
+        }
+        const std::string save = other ? "Save to " + other->name : "";
+        const ui::Hint hints[] = { { ui::Button::cross, save.c_str() }, { ui::Button::circle, "Cancel" } };
+        dialog(kRose, "NOT ENOUGH SPACE", head, text, other ? hints : hints + 1, other ? 2 : 1);
+    }
+    // The question before downloading next to a loaded model.
+    if (market_confirm_) {
+        std::snprintf(text, sizeof(text), "%s holds most of the memory.", live_.model_label.c_str());
+        const std::string head = text;
+        std::snprintf(text, sizeof(text),
+                      "%.1f GiB is free. The download may be slower while it stays loaded. Unloading restarts the app "
+                      "without it, and the download starts on its own.",
+                      live_.free_gib);
+        const ui::Hint hints[] = { { ui::Button::triangle, "Unload and download" }, { ui::Button::cross, "Download anyway" },
+                                   { ui::Button::circle, "Cancel" } };
+        dialog(kAmber, "A MODEL IS LOADED", head, text, hints, 3);
+    }
+
+    // The download, under both panes.
+    const float by = p.y + p.h - 64;
+    list.rounded_rect({ p.x + kPad, by - 24, p.w - 2 * kPad, 1 }, 0, kInk.with_alpha(0.1f));
+    const Download * active = nullptr;
+    int waiting = 0;
+    for (const auto & d : M.downloads) {
+        if ((d.state == DownloadState::running || d.state == DownloadState::retrying) && !active) {
+            active = &d;  // the worker runs one at a time; the first is it
+        } else if (d.state == DownloadState::queued) {
+            ++waiting;
+        }
+    }
+    if (active) {
+        std::string line = active->file + "  \xC2\xB7  " + download_line(*active);
+        if (waiting > 0) {
+            line += "  \xC2\xB7  " + std::to_string(waiting) + " more queued";
+        }
+        ui::text(list, f.regular, f.regular.font->fit(line, 20, p.w - 2 * kPad - 420), p.x + kPad, by + 6, 20, kInk);
+        bar(list, { p.x + p.w - kPad - 380, by - 4, 380, 12 },
+            active->bytes ? (float) ((double) active->done / (double) active->bytes) : 0.0f,
+            active->state == DownloadState::retrying ? kAmber : kLime);
+    } else {
+        const std::string note = !M.note.empty() ? M.note + "  \xC2\xB7  R1 for Downloads"
+                                                 : "Downloads go to " + settings_.download_dir + "  \xC2\xB7  change in Settings";
+        ui::text(list, f.regular, f.regular.font->fit(note, 20, p.w - 2 * kPad), p.x + kPad, by + 6, 20, kInk.with_alpha(kMuted));
+    }
+}
+
+void Dashboard::update_downloads(const hui::InputFrame & input, ui::Feedback & feedback) {
+    const int rows = (int) market_.downloads.size();
+    dl_cursor_ = std::clamp(dl_cursor_, 0, std::max(0, rows - 1));
+    if (input.nav == Direction::up || input.nav == Direction::down) {
+        const int next = dl_cursor_ + (input.nav == Direction::down ? 1 : -1);
+        if (next >= 0 && next < rows) {
+            dl_cursor_ = next;
+            dl_confirm_ = -1;
+            feedback.play(hui::audio::Cue::focus, 1.0f + 0.02f * (float) next);
+        } else if (!input.nav_repeat) {
+            feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
+        }
+    }
+    if (rows == 0) {
+        return;
+    }
+    const Download & d = market_.downloads[(size_t) dl_cursor_];
+    if (input.is_pressed(Action::confirm)) {
+        if (d.state == DownloadState::running || d.state == DownloadState::retrying || d.state == DownloadState::queued) {
+            request_ = { Request::download_pause, "", dl_cursor_ };
+            feedback.play(hui::audio::Cue::select);
+        } else if (d.state == DownloadState::paused || d.state == DownloadState::failed) {
+            request_ = { Request::download_resume, "", dl_cursor_ };
+            feedback.play(hui::audio::Cue::complete);
+        } else {
+            feedback.play(hui::audio::Cue::error, 1.0f, 0.0f, 0.6f);
+        }
+    }
+    // Square: a finished one leaves the list; any other is cancelled and its
+    // partial file deleted, after a second press.
+    if (input.is_pressed(Action::west)) {
+        if (d.state == DownloadState::done || dl_confirm_ == dl_cursor_) {
+            request_ = { Request::download_remove, "", dl_cursor_ };
+            dl_confirm_ = -1;
+            feedback.play(hui::audio::Cue::back);
+        } else {
+            dl_confirm_ = dl_cursor_;
+            feedback.play(hui::audio::Cue::modal_open);
+        }
+    }
+}
+
+void Dashboard::draw_downloads(gfx::DrawList & list) const {
+    const ui::Fonts & f = fonts_;
+    const Rect & p = kLogPanel;
+    draw_panel(list, p, kRadius, 0.0f, kLime);
+    caps(list, f, "DOWNLOADS", p.x + kPad, p.y + kLabelY, kLabelSize, kLime);
+    double left = 0;
+    for (const auto & d : market_.downloads) {
+        if (d.state != DownloadState::done) {
+            left += (double) (d.bytes - std::min(d.done, d.bytes));
+        }
+    }
+    char text[160];
+    std::snprintf(text, sizeof(text), "%zu in the list  \xC2\xB7  %.1f GiB to go  \xC2\xB7  they carry on after a lost connection or a restart",
+                  market_.downloads.size(), left / 1073741824.0);
+    ui::text(list, f.regular, text, p.x + p.w - kPad, p.y + kLabelY, 18, kInk.with_alpha(kMuted), gfx::Align::right);
+    if (market_.downloads.empty()) {
+        ui::text(list, f.regular, "Nothing downloading. Get models (L1) lists what fits; Cross on a file adds it here.",
+                 p.cx(), p.cy(), 24, kInk.with_alpha(kFaint), gfx::Align::center);
+        return;
+    }
+    constexpr float kRow = 112.0f;
+    constexpr int   kShown = 6;
+    const int first = std::max(0, dl_cursor_ - (kShown - 1));
+    for (int i = first; i < (int) market_.downloads.size() && i < first + kShown; ++i) {
+        const Download & d = market_.downloads[(size_t) i];
+        const Rect r{ p.x + kPad, p.y + 84 + (float) (i - first) * kRow, p.w - 2 * kPad, kRow - 14 };
+        if (i == dl_cursor_) {
+            list.glow(r, 18, 18, kLime.with_alpha(0.2f));
+            list.bordered_rect(r, 18, kLime.with_alpha(0.08f), 2.0f, kLime.with_alpha(0.7f));
+        }
+        const bool retrying = d.state == DownloadState::retrying;
+        const char * tag = d.state == DownloadState::running ? "DOWNLOADING" : retrying ? "RECONNECTING"
+                         : d.state == DownloadState::queued ? "QUEUED" : d.state == DownloadState::paused ? "PAUSED"
+                         : d.state == DownloadState::failed ? "FAILED" : "DONE";
+        const Color tc = d.state == DownloadState::running ? kLime : retrying ? kAmber : d.state == DownloadState::failed ? kRose
+                       : d.state == DownloadState::done ? kCyan : kInk.with_alpha(kMuted);
+        ui::text(list, f.semibold, f.semibold.font->fit(d.file, 24, r.w - 420), r.x + 20, r.y + 34, 24, kInk);
+        caps(list, f, tag, r.x + r.w - 20, r.y + 34, 15, tc, gfx::Align::right);
+        std::string sub = d.repo + "  \xC2\xB7  " + drive_name(d.dir) + "  \xC2\xB7  " + download_line(d);
+        if (dl_confirm_ == i) {
+            sub = "Square again cancels it and deletes the " + gib(d.done / 1073741824.0) + " GiB downloaded so far";
+        }
+        ui::text(list, f.regular, f.regular.font->fit(sub, 18, r.w - 40), r.x + 20, r.y + 62, 18,
+                 dl_confirm_ == i ? kRose : kInk.with_alpha(kMuted));
+        bar(list, { r.x + 20, r.y + 78, r.w - 40, 8 }, d.bytes ? (float) ((double) d.done / (double) d.bytes) : 0.0f,
+            d.state == DownloadState::done ? kCyan : retrying ? kAmber : d.state == DownloadState::failed ? kRose : kLime);
+    }
+}
+
+void Dashboard::draw_logs(gfx::DrawList & list) const {
+    const ui::Fonts & f = fonts_;
+    const Rect & p = kLogPanel;
+    draw_panel(list, p, kRadius, 0.0f, kCyan);
+    // Two sources as tabs, the filter as a chip, and the position.
+    float x = p.x + kPad;
+    const char * names[2] = { "APP.LOG", "LLAMA.LOG" };
+    for (int k = 0; k < 2; ++k) {
+        const bool on = (k == 1) == log_llama_;
+        const float w = caps(list, f, names[k], x, p.y + kLabelY, kLabelSize, on ? kCyan : kInk.with_alpha(kFaint));
+        if (on) {
+            list.rounded_rect({ x, p.y + kLabelY + 12, w, 3 }, 1.5f, kCyan);
+        }
+        x += w + 36;
+    }
+    if (log_errors_) {
+        const Rect chip{ x, p.y + 22, 170, 34 };
+        list.bordered_rect(chip, 17, kRose.with_alpha(0.12f), 1.5f, kRose.with_alpha(0.6f));
+        caps(list, f, "ERRORS ONLY", chip.cx(), chip.cy() + 6, 14, kRose, gfx::Align::center);
+    }
+    const auto & lines = log_view();
+    char text[64];
+    if (log_scroll_ > 0) {
+        std::snprintf(text, sizeof(text), "%zu %s, %d up from the newest", lines.size(), lines.size() == 1 ? "line" : "lines", log_scroll_);
+    } else {
+        std::snprintf(text, sizeof(text), "%zu %s, following the newest", lines.size(), lines.size() == 1 ? "line" : "lines");
+    }
+    ui::text(list, f.regular, text, p.x + p.w - kPad, p.y + kLabelY, 20, kInk.with_alpha(kMuted), gfx::Align::right);
+    list.rounded_rect({ p.x + kPad, p.y + 72, p.w - 2 * kPad, 1 }, 0, kInk.with_alpha(0.1f));
+
+    if (lines.empty()) {
+        ui::text(list, f.regular, log_errors_ ? "No errors or warnings" : "Nothing logged yet", p.cx(), p.cy(), 26,
+                 kInk.with_alpha(kFaint), gfx::Align::center);
+        return;
+    }
+    const int last  = (int) lines.size() - 1 - log_scroll_;
+    const int first = std::max(0, last - kLogLines + 1);
+    for (int i = first; i <= last; ++i) {
+        const std::string & line = lines[(size_t) i];
+        const int level = log_level(line);
+        const Color c = level == 2 ? kRose : level == 1 ? kAmber : line.rfind("ps5lm-app:", 0) == 0 ? kInk : kInk.with_alpha(kMuted);
+        const float y = p.y + 108 + (float) (i - first) * kLogLineH;
+        ui::text(list, f.mono, f.mono.font->fit(line, 17, p.w - 2 * kPad - 24), p.x + kPad, y, 17, c);
+    }
+    // Where the view is in the log.
+    const float track_h = kLogLines * kLogLineH;
+    const float shown = std::min(1.0f, (float) kLogLines / (float) lines.size());
+    const float top = 1.0f - (float) (last + 1) / (float) lines.size();
+    list.rounded_rect({ p.x + p.w - 18, p.y + 88, 4, track_h }, 2, kInk.with_alpha(0.08f));
+    list.rounded_rect({ p.x + p.w - 18, p.y + 88 + track_h * top, 4, std::max(24.0f, track_h * shown) }, 2,
+                      kCyan.with_alpha(0.8f));
 }
 
 void Dashboard::draw_hints(DashboardFrame & frame) const {
@@ -647,9 +1921,58 @@ void Dashboard::draw_hints(DashboardFrame & frame) const {
         const char * act = !m ? "Load" : m->current ? "Unload" : "Load";
         const ui::Hint hints[] = { { ui::Button::dpad, "Choose" }, { ui::Button::cross, act }, { ui::Button::circle, "Back" } };
         ui::draw_hints(frame.overlay, fonts_, style, hints, 3, kGridX + kGridW, true);
+    } else if (details_.value > 0.5f) {
+        const ui::Hint hints[] = { { ui::Button::triangle, "Library" }, { ui::Button::circle, "Back" } };
+        const bool model = detail_tile_ == kModel;
+        ui::draw_hints(frame.overlay, fonts_, style, model ? hints : hints + 1, model ? 2 : 1, kGridX + kGridW, true);
+    } else if (page_ == 1) {
+        const Setting row_id = kCategories[setting_category_].rows[setting_row_].id;
+        const bool toggle = in_rows_ && (is_toggle(row_id) || row_id == Setting::clear_scratch);
+        if (!in_rows_) {
+            const ui::Hint hints[] = { { ui::Button::dpad, "Choose" }, { ui::Button::cross, "Open" } };
+            ui::draw_hints(frame.scene, fonts_, style, hints, 2, kGridX + kGridW, true);
+        } else {
+            const ui::Hint hints[] = { { ui::Button::dpad, "Change" },
+                                       { ui::Button::cross, row_id == Setting::clear_scratch ? "Clear" : "Switch" },
+                                       { ui::Button::circle, "Back" } };
+            const ui::Hint plain[] = { { ui::Button::dpad, "Change" }, { ui::Button::circle, "Back" } };
+            ui::draw_hints(frame.scene, fonts_, style, toggle ? hints : plain, toggle ? 3 : 2, kGridX + kGridW, true);
+        }
+    } else if (page_ == kMarketPage && (market_confirm_ || market_space_)) {
+        // The dialog carries its own buttons.
+    } else if (page_ == kMarketPage) {
+        const ui::Hint browse[] = { { ui::Button::l2, "Search" }, { ui::Button::dpad, "Choose" }, { ui::Button::cross, "Open" } };
+        const ui::Hint files[] = { { ui::Button::dpad, "Choose" }, { ui::Button::square, "Check fit" }, { ui::Button::cross, "Download" },
+                                   { ui::Button::circle, "Back" } };
+        ui::draw_hints(frame.scene, fonts_, style, market_files_ ? files : browse, market_files_ ? 4 : 3, kGridX + kGridW, true);
+    } else if (page_ == kDownloadsPage) {
+        const Download * d = dl_cursor_ < (int) market_.downloads.size() ? &market_.downloads[(size_t) dl_cursor_] : nullptr;
+        const bool runs = d && (d->state == DownloadState::running || d->state == DownloadState::retrying ||
+                                d->state == DownloadState::queued);
+        const char * cross = !d ? "" : runs ? "Pause" : d->state == DownloadState::done ? "" : d->state == DownloadState::failed ? "Try again" : "Resume";
+        const char * square = !d ? "" : d->state == DownloadState::done ? "Clear from list" : dl_confirm_ == dl_cursor_ ? "Yes, delete it" : "Cancel";
+        const ui::Hint all[] = { { ui::Button::dpad, "Choose" }, { ui::Button::square, square }, { ui::Button::cross, cross } };
+        const ui::Hint done[] = { { ui::Button::dpad, "Choose" }, { ui::Button::square, square } };
+        if (d) {
+            const bool has_cross = d->state != DownloadState::done;
+            ui::draw_hints(frame.scene, fonts_, style, has_cross ? all : done, has_cross ? 3 : 2, kGridX + kGridW, true);
+        }
+    } else if (page_ == kLogsPage) {
+        const ui::Hint hints[] = { { ui::Button::dpad, "Scroll" },
+                                   { ui::Button::square, log_llama_ ? "app.log" : "llama.log" },
+                                   { ui::Button::triangle, log_errors_ ? "All lines" : "Errors only" },
+                                   { ui::Button::cross, "Newest" } };
+        ui::draw_hints(frame.scene, fonts_, style, hints, 4, kGridX + kGridW, true);
+    } else if (focus_ == kModel) {
+        const bool loaded = !live_.model_label.empty();
+        const ui::Hint hints[] = { { ui::Button::dpad, "Move" },
+                                   { ui::Button::cross, loaded ? "Details" : "Library" },
+                                   { ui::Button::triangle, "Library" } };
+        ui::draw_hints(frame.scene, fonts_, style, hints, loaded ? 3 : 2, kGridX + kGridW, true);
     } else {
-        const ui::Hint hints[] = { { ui::Button::dpad, "Move" }, { ui::Button::cross, "Models" } };
-        ui::draw_hints(frame.scene, fonts_, style, hints, focus_ == kModel ? 2 : 1, kGridX + kGridW, true);
+        const ui::Hint hints[] = { { ui::Button::dpad, "Move" }, { ui::Button::cross, "Expand" } };
+        const bool expands = focus_ == kUsage || focus_ == kPower;
+        ui::draw_hints(frame.scene, fonts_, style, hints, expands ? 2 : 1, kGridX + kGridW, true);
     }
 }
 
@@ -661,31 +1984,72 @@ void Dashboard::draw(DashboardFrame & frame) const {
     frame.backdrop.time = clock_;
 
     gfx::DrawList & scene = frame.scene;
-    const float open = library_.value;
-    scene.push_transform(1.0f - 0.04f * open, 960, 564, 0, 0);
-    scene.push_opacity(1.0f - 0.6f * open);
-    for (int i = 0; i < kTiles; ++i) {
-        if (i != focus_) {
-            draw_tile(scene, i);
+    // A page arrives from the side it was asked for and fades in.
+    const float in = tween::cubic_out(tween::clamp01(page_age_ / 0.35f));
+    const float from = page_ > page_from_ ? 1.0f : -1.0f;
+    scene.push_transform(1.0f, 960, 564, 60.0f * from * (1.0f - in), 0);
+    scene.push_opacity(in);
+    if (page_ == 0) {
+        const float open = std::max(library_.value, details_.value);
+        scene.push_transform(1.0f - 0.04f * open, 960, 564, 0, 0);
+        scene.push_opacity(1.0f - 0.6f * open);
+        for (int i = 0; i < kTiles; ++i) {
+            if (i != focus_) {
+                draw_tile(scene, i);
+            }
         }
-    }
-    draw_tile(scene, focus_);  // last: its glow and shadow sit on its neighbours
-    const float alpha = tween::stagger(age_, focus_, 0.06f, 0.5f) * (1.0f - tween::clamp01(open * 4.0f));
-    if (alpha > 0.01f) {
-        Rect ring = ring_.value();
-        const float nudge = ui::shake(refusal_.value, clock_, 10.0f, 9.0f);
-        ring.x += nudge * refusal_x_;
-        ring.y += nudge * refusal_y_;
-        scene.bordered_rect(ring, kRadius + 5.0f, kClear, 3.0f, accent_of(focus_).with_alpha(alpha));
+        draw_tile(scene, focus_);  // last: its glow and shadow sit on its neighbours
+        const float alpha = tween::stagger(age_, focus_, 0.06f, 0.5f) * (1.0f - tween::clamp01(open * 4.0f));
+        if (alpha > 0.01f) {
+            Rect ring = ring_.value();
+            const float nudge = ui::shake(refusal_.value, clock_, 10.0f, 9.0f);
+            ring.x += nudge * refusal_x_;
+            ring.y += nudge * refusal_y_;
+            scene.bordered_rect(ring, kRadius + 5.0f, kClear, 3.0f, accent_of(focus_).with_alpha(alpha));
+        }
+        scene.pop_opacity();
+        scene.pop_transform();
+    } else if (page_ == 1) {
+        draw_settings(scene);
+    } else if (page_ == kLogsPage) {
+        draw_logs(scene);
+    } else if (page_ == kDownloadsPage) {
+        draw_downloads(scene);
+    } else {
+        draw_market(scene);
     }
     scene.pop_opacity();
     scene.pop_transform();
     draw_header(scene);
-    if (open > 0.01f) {
+    draw_tabs(scene);
+    if (library_.value > 0.01f || details_.value > 0.01f) {
         frame.glass = true;
         draw_library(frame.overlay, frame.glass_texture);
+        draw_details(frame.overlay, frame.glass_texture);
     }
     draw_hints(frame);
+    if (busy()) {
+        draw_busy(frame.overlay);  // the overlay draws last, over the library too
+    }
+}
+
+// Slow work: a scrim, a turning arc and what is happening, so a pause never
+// looks like a hang.
+void Dashboard::draw_busy(gfx::DrawList & list) const {
+    const ui::Fonts & f = fonts_;
+    list.rounded_rect({ 0, 0, 1920, 1080 }, 0, kBlack.with_alpha(0.6f));
+    const Rect d{ 960 - 420, 540 - 120, 840, 240 };
+    list.shadow({ d.x, d.y + 18, d.w, d.h }, 28, 40, kBlack.with_alpha(0.6f));
+    draw_panel(list, d, 28, 1.0f, kCyan);
+    const float cx = d.x + 92, cy = d.cy();
+    list.ring(cx, cy, 34, 6, kInk.with_alpha(0.12f));
+    const float sweep = 1.6f + 0.9f * std::sin(clock_ * 2.1f);
+    list.arc(cx, cy, 34, 6, clock_ * 5.0f, sweep, kCyan);
+    ui::text(list, f.semibold, f.semibold.font->fit(busy_title_, 28, d.w - 200), d.x + 160, cy - 10, 28, kInk);
+    if (!busy_text_.empty()) {
+        ui::text(list, f.regular, f.regular.font->fit(busy_text_, 21, d.w - 200), d.x + 160, cy + 30, 21,
+                 kInk.with_alpha(kMuted));
+    }
 }
 
 }  // namespace ps5lm

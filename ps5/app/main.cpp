@@ -13,7 +13,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <pthread.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -23,6 +25,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <span>
@@ -35,10 +38,14 @@
 #include <GL/glcorearb.h>
 
 #include "dashboard.hpp"
+#include "fetch.hpp"
+#include "market.hpp"
 #include "display.hpp"
 #include "ggml-backend.h"
 #include "model_plan.hpp"
+#include "settings.hpp"
 #include "stats.hpp"
+#include "version.hpp"
 
 #include <ps5platform/heap.h>
 #include <ps5platform/kernel.h>
@@ -94,11 +101,117 @@ constexpr const char * kLog         = "/data/PS5LM/app.log";
 constexpr const char * kArgs        = "/data/PS5LM/app-args.txt";
 constexpr const char * kChoice      = "/data/PS5LM/model.txt";
 constexpr const char * kQuit        = "/data/PS5LM/quit";
+constexpr const char * kSettings    = "/data/PS5LM/settings.json";
+constexpr const char * kScratch     = "/data/PS5LM/scratch";
+// The file tools only: a title cannot start processes (no shell command).
+constexpr const char * kTools       = "read_file,write_file,edit_file,file_glob_search,grep_search,get_info";
+constexpr const char * kLlamaLog    = "/data/PS5LM/llama.log";
 constexpr const char * kModels      = "/data/PS5LM/models";
 constexpr const char * kAssets      = "/app0/assets";
 constexpr int          kPort        = 8081;
-const std::vector<std::string> kModelDirs = { kModels, "/mnt/usb0/PS5LM/models", "/mnt/usb1/PS5LM/models",
-                                              "/mnt/usb0", "/mnt/usb1" };
+const std::vector<std::string> kModelDirs = { kModels, "/mnt/ext0/PS5LM/models", "/mnt/usb0/PS5LM/models",
+                                              "/mnt/usb1/PS5LM/models", "/mnt/usb0", "/mnt/usb1" };
+
+// The last lines of a log, up to about 64 KiB of it, oldest first.
+std::vector<std::string> tail_lines(const char * path) {
+    std::vector<std::string> lines;
+    FILE * f = std::fopen(path, "rb");
+    if (!f) {
+        return lines;
+    }
+    std::fseek(f, 0, SEEK_END);
+    const long size = std::ftell(f);
+    const long from = std::max(0L, size - 65536L);
+    std::fseek(f, from, SEEK_SET);
+    std::string text((size_t) (size - from), '\0');
+    text.resize(std::fread(text.data(), 1, text.size(), f));
+    std::fclose(f);
+    size_t start = from > 0 ? text.find('\n') + 1 : 0;  // the first line is cut
+    for (size_t end; start < text.size() && (end = text.find('\n', start)) != std::string::npos; start = end + 1) {
+        lines.emplace_back(text, start, end - start);
+    }
+    return lines;
+}
+
+// Probe: download a URL over HTTPS to /data/PS5LM/fetch.out, logging the
+// status, size and speed (scripts/ps5lm-app.sh fetch <url>).
+void probe_fetch(std::string url) {
+    FILE * out = std::fopen("/data/PS5LM/fetch.out", "wb");
+    const FetchResult r = https_get(url, "", [&](const char * p, size_t n) { return out && std::fwrite(p, 1, n, out) == n; });
+    if (out) {
+        std::fclose(out);
+    }
+    std::printf("ps5lm-app: fetch %s: status %d, length %lld, %llu bytes in %.1f s (%.2f MB/s)%s%s\n", url.c_str(),
+                r.status, (long long) r.length, (unsigned long long) r.bytes, r.seconds,
+                r.seconds > 0 ? r.bytes / 1e6 / r.seconds : 0.0, r.error.empty() ? "" : ", ", r.error.c_str());
+}
+
+// Probe: how fast the app can write, by method and place, fsync included
+// (scripts/ps5lm-app.sh bench-write). 128 MiB each.
+void probe_write() {
+    const size_t total = 128u << 20;
+    std::vector<char> buf(8u << 20, 'x');
+    const char * dirs[] = { "/data/PS5LM", "/mnt/usb0" };
+    for (const char * dir : dirs) {
+        struct statvfs v = {};
+        if (statvfs(dir, &v) != 0) {
+            continue;
+        }
+        const std::string path = std::string(dir) + "/write-bench.tmp";
+        struct Method {
+            const char * name;
+            size_t       chunk;
+            bool         stdio;
+            int          flags;
+        } methods[] = {
+            { "stdio 8M", 8u << 20, true, 0 },
+            { "write 1M", 1u << 20, false, 0 },
+            { "write 8M", 8u << 20, false, 0 },
+            { "write 8M direct", 8u << 20, false, O_DIRECT },
+        };
+        for (const auto & m : methods) {
+            const auto t0 = std::chrono::steady_clock::now();
+            bool ok = true;
+            if (m.stdio) {
+                FILE * f = std::fopen(path.c_str(), "wb");
+                for (size_t done = 0; f && ok && done < total; done += m.chunk) {
+                    ok = std::fwrite(buf.data(), 1, m.chunk, f) == m.chunk;
+                }
+                ok = f && ok && std::fflush(f) == 0 && fsync(fileno(f)) == 0;
+                if (f) {
+                    std::fclose(f);
+                }
+            } else {
+                const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | m.flags, 0666);
+                for (size_t done = 0; fd >= 0 && ok && done < total; done += m.chunk) {
+                    ok = write(fd, buf.data(), m.chunk) == (ssize_t) m.chunk;
+                }
+                ok = fd >= 0 && ok && fsync(fd) == 0;
+                if (fd >= 0) {
+                    close(fd);
+                }
+            }
+            const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            std::printf("ps5lm-app: write-bench %s %s: %s, %.1f MB/s\n", dir, m.name, ok ? "ok" : strerror(errno),
+                        ok ? total / 1e6 / s : 0.0);
+            unlink(path.c_str());
+        }
+    }
+    std::printf("ps5lm-app: write-bench done\n");
+}
+
+// Bytes under a folder, or 0.
+uint64_t folder_bytes(const char * path) {
+    std::error_code ec;
+    uint64_t total = 0;
+    for (auto it = std::filesystem::recursive_directory_iterator(path, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (it->is_regular_file(ec)) {
+            total += it->file_size(ec);
+        }
+    }
+    return total;
+}
 
 // A system notification on the TV.
 void notify(const char * text) {
@@ -209,7 +322,15 @@ std::vector<std::string> read_lines(const char * path) {
     return out;
 }
 
-bool is_usb(const std::string & path) { return path.rfind("/mnt/usb", 0) == 0; }
+// Free GiB on the drive whose models folder is `dir`, or -1 when unknown.
+double free_gib(const std::string & dir) {
+    for (const auto & d : mounted_drives()) {
+        if (d.models == dir && d.total > 0) {
+            return d.free;
+        }
+    }
+    return -1;
+}
 
 std::string base_name(const std::string & path) {
     std::string n = path.substr(path.find_last_of('/') + 1);
@@ -253,21 +374,71 @@ struct Models {
     std::string            running;          // path of the model llama-server has
     pthread_t              server{};
     bool                   server_started = false;
+    Settings               settings;
+
+    const char * kv_force() const { return settings.kv_type == "auto" ? nullptr : settings.kv_type.c_str(); }
 
     void scan(StatsCollector & stats) {
-        rows.clear();
+        rows = plan_rows(settings, budget_gib, running);
+        publish(stats);
+    }
+
+    // scan() on its own thread, for a settings change: the dashboard shows it
+    // working instead of freezing while every header is read.
+    std::mutex             scan_mutex;
+    std::vector<ModelRow>  scanned;
+    std::atomic<int>       scan_state{ 0 };  // 0 idle, 1 running, 2 done
+    bool                   scan_again = false;
+    bool                   scan_shown = true;  // the dashboard says it is working
+
+    void rescan(StatsCollector & stats, bool shown = true) {
+        scan_shown = shown;
+        if (scan_state != 0) {
+            scan_again = true;  // the running one read the old settings
+            return;
+        }
+        scan_state = 1;
+        std::thread([this, s = settings, b = budget_gib, r = running] {
+            std::vector<ModelRow> out = plan_rows(s, b, r);
+            std::lock_guard<std::mutex> lock(scan_mutex);
+            scanned = std::move(out);
+            scan_state = 2;
+        }).detach();
+        (void) stats;
+    }
+
+    // Takes a finished rescan; true while one is still running.
+    bool poll_rescan(StatsCollector & stats) {
+        if (scan_state == 2) {
+            {
+                std::lock_guard<std::mutex> lock(scan_mutex);
+                rows = std::move(scanned);
+            }
+            scan_state = 0;
+            publish(stats);
+            if (scan_again) {
+                scan_again = false;
+                rescan(stats);
+            }
+        }
+        return scan_state != 0;
+    }
+
+    static std::vector<ModelRow> plan_rows(const Settings & settings, double budget_gib, const std::string & running) {
+        std::vector<ModelRow> rows;
+        const char * kv = settings.kv_type == "auto" ? nullptr : settings.kv_type.c_str();
         for (const auto & path : find_models(kModelDirs)) {
             const ModelInfo m = read_model_info(path);
             ModelRow row;
             row.file = path;
             row.label = base_name(path);
-            row.on_usb = is_usb(path);
+            row.drive = drive_name(path);
             if (!m.ok) {
                 row.plan = m.error;
                 rows.push_back(row);
                 continue;
             }
-            const Plan p = plan_model(m, budget_gib);
+            const Plan p = plan_model(m, budget_gib, settings.ctx_cap, kv);
             const Preset * pre = find_preset(m);
             row.arch = m.arch;
             row.plan = p.why;
@@ -278,7 +449,7 @@ struct Models {
             rows.push_back(row);
             std::printf("ps5lm-app: model %s (%s): %s\n", m.file_name.c_str(), m.arch.c_str(), p.why.c_str());
         }
-        publish(stats);
+        return rows;
     }
 
     void publish(StatsCollector & stats) {
@@ -292,9 +463,12 @@ struct Models {
     // The arguments for a model: the planner's, or app-args.txt's verbatim.
     std::vector<std::string> args_for(const std::string & path, Live & model_part) {
         const ModelInfo m = read_model_info(path);
-        const Plan p = plan_model(m, budget_gib);
+        const Plan p = plan_model(m, budget_gib, settings.ctx_cap, kv_force());
         const Preset * pre = find_preset(m);
         model_part.model_label = base_name(path);
+        model_part.model_file  = path;
+        model_part.plan        = p.why;
+        model_part.args        = p.args;
         model_part.model_arch  = m.arch;
         model_part.preset      = pre ? pre->label : "";
         model_part.model_gib   = m.file_bytes / 1073741824.0;
@@ -311,6 +485,15 @@ struct Models {
         if (std::find(args.begin(), args.end(), "--metrics") == args.end()) {
             args.push_back("--metrics");
         }
+        // The browser chat's file tools, confined to the scratch folder by
+        // patches/0003 (LLAMA_TOOLS_ROOT) and working there by default.
+        if (settings.tools && std::find(args.begin(), args.end(), "--tools") == args.end()) {
+            std::error_code ec;
+            std::filesystem::create_directories(kScratch, ec);
+            setenv("LLAMA_TOOLS_ROOT", kScratch, 1);
+            chdir(kScratch);
+            args.insert(args.end(), { "--tools", kTools });
+        }
         for (const auto & a : args) {
             std::printf("ps5lm-app: arg %s\n", a.c_str());
         }
@@ -325,7 +508,7 @@ struct Models {
         pthread_attr_setstacksize(&attr, 16u << 20);  // the console's default stack is small
         pthread_create(&server, &attr, run_server, nullptr);
         server_started = true;
-        notify("PS5LM: loading the model onto the GPU");
+        notify("PS5LM Plus: loading the model onto the GPU");
     }
 
     void stop() {
@@ -333,7 +516,17 @@ struct Models {
             return;
         }
         llama_server_terminate();
-        pthread_join(server, nullptr);
+        // With a reply in flight llama-server can stay inside its HTTP thread
+        // pool forever (unload during generation hung the app). We are about
+        // to be replaced by LoadExec anyway, so wait 10 s at most.
+        for (int i = 0; i < 100 && g_server_rc < 0; ++i) {
+            usleep(100 * 1000);
+        }
+        if (g_server_rc >= 0) {
+            pthread_join(server, nullptr);
+        } else {
+            std::printf("ps5lm-app: llama_server did not return in 10 s; restarting anyway\n");
+        }
         server_started = false;
         running.clear();
         log_memory("after unloading");
@@ -362,6 +555,7 @@ int main(int, char **) {
     if (std::freopen(kLog, "a", stderr) != nullptr) {
         setvbuf(stderr, nullptr, _IONBF, 0);
     }
+    std::printf("ps5lm-app: version " PS5LM_VERSION "\n");
     // One device-local heap over the whole pool (RADV splits an APU's 2/3 to
     // 1/3), and a HOME for llama.cpp, which throws without one.
     setenv("radv_enable_unified_heap_on_apu", "true", 1);
@@ -402,11 +596,13 @@ int main(int, char **) {
 
     StatsCollector stats;
     stats.start(kPort);
+    models.settings = load_settings(kSettings);
     models.scan(stats);
 
     // Which model: app-args.txt verbatim, else model.txt, which the library
     // writes just before restarting the app for a switch and which is used
-    // once. A plain launch loads nothing and opens the library instead.
+    // once, else the default model when Settings asks for it at launch. A
+    // plain launch otherwise loads nothing and opens the library.
     Live model_part;
     std::vector<std::string> args = read_lines(kArgs);
     std::string path;
@@ -417,10 +613,15 @@ int main(int, char **) {
         const ModelInfo info = read_model_info(path);
         model_part.model_arch = info.arch;
         model_part.model_gib = info.file_bytes / 1073741824.0;
+        model_part.model_file = path;
+        model_part.args = args;
         std::printf("ps5lm-app: app-args.txt overrides the planner\n");
     } else {
-        const auto chosen = read_lines(kChoice);
+        auto chosen = read_lines(kChoice);
         unlink(kChoice);
+        if (chosen.empty() && models.settings.auto_load && !models.settings.default_model.empty()) {
+            chosen = { models.settings.default_model };  // "none" after an unload keeps it from coming back
+        }
         for (const auto & r : models.rows) {
             if (r.fits && !chosen.empty() && r.file == chosen[0]) {
                 path = r.file;
@@ -436,7 +637,7 @@ int main(int, char **) {
     } else {
         stats.set_state(ServerState::no_model);
         if (models.rows.empty()) {
-            notify("PS5LM: no models; copy a .gguf to /data/PS5LM/models or PS5LM/models on a USB drive");
+            notify("PS5LM Plus: no models; copy a .gguf to /data/PS5LM/models or PS5LM/models on a USB drive");
         }
     }
 
@@ -451,12 +652,30 @@ int main(int, char **) {
     sounds.load(std::string(kAssets) + "/audio/sfx");
 
     Dashboard dash(fonts);
+    Market    market;
+    market.start(models.budget_gib);
+    int  saved_seen = 0;  // downloads finished, as last seen
+    dash.set_settings(models.settings);
     bool      library_shown = false;  // opened once at launch when no model is loaded
+    bool      scratch_warned = false;
+    // Downloads left queued or running carry on, on their own page.
+    unlink("/data/PS5LM/download.txt");  // the queue file replaced this one (v0.7.0)
+    market.load_queue();
+    for (const auto & d : market.snapshot().downloads) {
+        // Running already, maybe: the queue's thread starts it at once.
+        if (d.state == DownloadState::queued || d.state == DownloadState::running) {
+            dash.show_page(Dashboard::kDownloadsPage);
+            library_shown = true;  // stay on Downloads, not the library
+            break;
+        }
+    }
     DashboardFrame frame;
     hui::ui::Feedback feedback;
     hui::PadSample samples[64];
     int64_t last = hui::sys::monotonic_us();
     bool was_serving = false;
+    bool rescanning = false;
+    uint64_t restart_at = 0;  // the frame to stop the model and restart on, or 0
     for (uint64_t n = 0;; ++n) {
         const int64_t now = hui::sys::monotonic_us();
         const float dt = n == 0 ? 1.0f / 60.0f : std::min(0.05f, (float) (now - last) / 1e6f);
@@ -467,11 +686,11 @@ int main(int, char **) {
         Live live = stats.snapshot();
         if (g_server_rc >= 0 && live.state != ServerState::failed && live.state != ServerState::no_model) {
             stats.set_state(ServerState::failed);
-            notify("PS5LM: the server stopped, see /data/PS5LM/llama.log");
+            notify("PS5LM Plus: the server stopped, see /data/PS5LM/llama.log");
         }
         const bool serving = live.state == ServerState::ready || live.state == ServerState::generating;
         if (serving && !was_serving) {
-            notify("PS5LM: ready, chat in a browser on this network");
+            notify("PS5LM Plus: ready, chat in a browser on this network");
         }
         was_serving = serving;
         if (n % 30 == 0) {
@@ -485,8 +704,42 @@ int main(int, char **) {
             }
         }
         feedback.clear();
-        dash.update(input, dt, feedback);
+        // A button pressed from the PC (scripts/ps5lm-app.sh press r1), for
+        // testing the screens without a controller in hand.
+        hui::InputFrame in = input;
+        if (n % 20 == 10) {
+            const std::string key = take_request_file("/data/PS5LM/press");
+            const struct {
+                const char *   name;
+                hui::Action    action;
+                hui::Direction nav;
+            } keys[] = {
+                { "up", hui::Action::up, hui::Direction::up },
+                { "down", hui::Action::down, hui::Direction::down },
+                { "left", hui::Action::left, hui::Direction::left },
+                { "right", hui::Action::right, hui::Direction::right },
+                { "cross", hui::Action::confirm, hui::Direction::none },
+                { "circle", hui::Action::back, hui::Direction::none },
+                { "triangle", hui::Action::north, hui::Direction::none },
+                { "square", hui::Action::west, hui::Direction::none },
+                { "l1", hui::Action::page_prev, hui::Direction::none },
+                { "r1", hui::Action::page_next, hui::Direction::none },
+                { "l2", hui::Action::jump_prev, hui::Direction::none },
+                { "r2", hui::Action::jump_next, hui::Direction::none },
+            };
+            for (const auto & k : keys) {
+                if (key == k.name) {
+                    in.connected = true;
+                    in.pressed |= hui::action_bit(k.action);
+                    in.nav = k.nav;
+                }
+            }
+        }
+        dash.update(in, dt, feedback);
         for (const auto & cue : feedback.cues) {
+            if (!models.settings.sounds) {
+                break;
+            }
             sounds.play(mixer, cue.set == hui::audio::SoundSet::count ? hui::audio::SoundSet::glass : cue.set, cue);
         }
         if (feedback.rumble_strength > 0.0f) {
@@ -494,13 +747,116 @@ int main(int, char **) {
         }
         pad.tick(dt);
 
+        // The scratch folder: its size for the dashboard, and one warning each
+        // time it grows past the limit.
+        if (n % 600 == 300) {
+            const double gib = folder_bytes(kScratch) / 1073741824.0;
+            stats.set_scratch(gib);
+            const bool over = gib > models.settings.scratch_limit_gib;
+            if (over && !scratch_warned) {
+                char text[128];
+                std::snprintf(text, sizeof(text), "PS5LM Plus: the chat's scratch folder holds %.1f GiB; clear it in Settings", gib);
+                notify(text);
+                std::printf("ps5lm-app: %s\n", text + 7);
+            }
+            scratch_warned = over;
+        }
+        if (n % 10 == 0) {
+            MarketView mv = market.snapshot();
+            // A finished download joins the library.
+            if (mv.saved != saved_seen) {
+                saved_seen = mv.saved;
+                models.rescan(stats, false);
+                notify(("PS5LM Plus: " + mv.note).c_str());
+            }
+            dash.set_market(std::move(mv));
+        }
+        if (dash.page() == Dashboard::kLogsPage && n % 60 == 0) {
+            dash.set_logs(tail_lines(kLog), tail_lines(kLlamaLog));
+        }
+
+        // A settings rescan in the background: say so until it lands.
+        if (models.poll_rescan(stats) && models.scan_shown) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "Planning every model again for %uk tokens and the %s cache",
+                          models.settings.ctx_cap / 1024, models.settings.kv_type.c_str());
+            dash.set_busy("Applying the new limits", text);
+            rescanning = true;
+        } else if (rescanning) {
+            rescanning = false;
+            dash.set_busy("");
+        }
+        // A restart asked for a few frames ago, once the busy screen is up.
+        if (restart_at != 0 && n >= restart_at) {
+            std::fflush(nullptr);
+            models.stop();
+            sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
+        }
+
         Dashboard::Request req = dash.take_request();
+        if (req.kind == Dashboard::Request::settings) {
+            // The planner's limits change every row's plan; the loaded model
+            // keeps its settings until it is loaded again.
+            // Only the context and cache limits change the plans; rescanning
+            // reads every model's header, seconds with a USB drive.
+            const Settings was = models.settings;
+            models.settings = dash.settings();
+            save_settings(kSettings, models.settings);
+            if (was.ctx_cap != models.settings.ctx_cap || was.kv_type != models.settings.kv_type) {
+                models.rescan(stats);
+            }
+            std::printf("ps5lm-app: settings saved\n");
+        }
+        switch (req.kind) {
+            case Dashboard::Request::market_search: market.search(req.path); break;
+            case Dashboard::Request::market_open: market.open_repo(req.repo); break;
+            case Dashboard::Request::market_plan: market.plan_file(req.repo, req.file); break;
+            case Dashboard::Request::market_download: {
+                MarketJob job;
+                if (market.job(req.repo, req.file, req.path.empty() ? models.settings.download_dir : req.path, &job)) {
+                    market.enqueue(job, free_gib(job.dir));
+                }
+                break;
+            }
+            case Dashboard::Request::download_pause: market.pause(req.repo); break;
+            case Dashboard::Request::download_resume: market.resume(req.repo); break;
+            case Dashboard::Request::download_remove: market.remove(req.repo); break;
+            case Dashboard::Request::market_download_unload: {
+                // Unload by restarting (as the library does); the queue,
+                // saved to disk, starts the download in the new process.
+                MarketJob job;
+                if (market.job(req.repo, req.file, req.path.empty() ? models.settings.download_dir : req.path, &job) &&
+                    market.enqueue(job, free_gib(job.dir))) {
+                    std::ofstream(kChoice) << "none\n";
+                    std::printf("ps5lm-app: restarting to download %s/%s without a model\n", job.repo.c_str(), job.file.c_str());
+                    dash.set_busy("Unloading " + base_name(models.running), "The app restarts without it, then the download starts");
+                    restart_at = n + 3;
+                }
+                break;
+            }
+            default: break;
+        }
+        if (req.kind == Dashboard::Request::clear_scratch) {
+            std::error_code ec;
+            for (const auto & e : std::filesystem::directory_iterator(kScratch, ec)) {
+                std::filesystem::remove_all(e.path(), ec);
+            }
+            stats.set_scratch(folder_bytes(kScratch) / 1073741824.0);
+            notify("PS5LM Plus: scratch folder cleared");
+            std::printf("ps5lm-app: scratch folder cleared\n");
+        }
         // The same requests from the PC (scripts/ps5lm-app.sh load|unload).
         if (n % 60 == 30 && req.kind == Dashboard::Request::none) {
             if (std::string p = take_request_file("/data/PS5LM/load"); !p.empty()) {
                 req = { Dashboard::Request::load, p };
             } else if (!take_request_file("/data/PS5LM/unload").empty()) {
                 req = { Dashboard::Request::unload, "" };
+            } else if (std::string u = take_request_file("/data/PS5LM/fetch"); !u.empty()) {
+                std::thread(probe_fetch, u).detach();
+            } else if (!take_request_file("/data/PS5LM/bench-write").empty()) {
+                std::thread(probe_write).detach();
+            } else if (std::string q = take_request_file("/data/PS5LM/search"); !q.empty()) {
+                market.search(q == "-" ? std::string() : q);  // a query typed on the PC
             }
         }
         if (req.kind == Dashboard::Request::unload || req.kind == Dashboard::Request::load) {
@@ -513,11 +869,16 @@ int main(int, char **) {
             if (req.kind == Dashboard::Request::load) {
                 unlink(kArgs);  // the library's choice replaces a manual override
             }
-            notify(req.kind == Dashboard::Request::load ? "PS5LM: loading the new model" : "PS5LM: model unloaded");
             std::printf("ps5lm-app: restarting for %s\n", req.kind == Dashboard::Request::load ? req.path.c_str() : "no model");
-            std::fflush(nullptr);
-            models.stop();
-            sceSystemServiceLoadExec("/app0/eboot.bin", nullptr);
+            const bool loaded = !models.running.empty();
+            if (req.kind == Dashboard::Request::load) {
+                dash.set_busy(loaded ? "Switching models" : "Loading " + base_name(req.path),
+                              loaded ? "Unloading " + base_name(models.running) + ", then the app restarts with " + base_name(req.path)
+                                     : "The app restarts to give the model the whole memory");
+            } else {
+                dash.set_busy("Unloading " + base_name(models.running), "The app restarts without a model, about 30 seconds");
+            }
+            restart_at = n + 3;  // three frames with the busy screen on the TV first
         }
 
         if (ui_ok) {

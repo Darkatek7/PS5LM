@@ -1,20 +1,73 @@
-// Host check for model_plan.cpp against real GGUF files:
+// Host check for model_plan.cpp:
 //   c++ -std=c++17 -O1 ps5/app/model_plan_test.cpp ps5/app/model_plan.cpp -o build/model_plan_test
-//   build/model_plan_test models
+//   build/model_plan_test          synthetic headers only
+//   build/model_plan_test models   also the real GGUF files in models/
 // Uses the budget the console reported (11.38 GiB free) and the two
 // configurations measured there.
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "model_plan.hpp"
 
+#include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
+namespace {
+
+// A GGUF header with string and uint32 metadata, no tensors.
+struct Gguf {
+    std::string kvs;
+    uint64_t    n = 0;
+    template <class T> static std::string raw(T v) { return std::string((const char *) &v, sizeof(v)); }
+    static std::string str(const std::string & v) { return raw<uint64_t>(v.size()) + v; }
+    Gguf & kv(const std::string & k, const std::string & v) { kvs += str(k) + raw<uint32_t>(8) + str(v); n++; return *this; }
+    Gguf & kv(const std::string & k, uint32_t v) { kvs += str(k) + raw<uint32_t>(4) + raw(v); n++; return *this; }
+    // magic, version 3, tensor count, metadata count, metadata
+    std::string bytes() const { return "GGUF" + raw<uint32_t>(3) + raw<uint64_t>(0) + raw(n) + kvs; }
+};
+
+bool has_args(const ps5lm::Plan & p, const char * flag, const char * value) {
+    auto it = std::find(p.args.begin(), p.args.end(), flag);
+    return it != p.args.end() && it + 1 != p.args.end() && *(it + 1) == value;
+}
+
+}  // namespace
+
 int main(int argc, char ** argv) {
-    const std::string dir = argc > 1 ? argv[1] : "models";
     const double budget = 11.38;
+
+    // A decision model (Clef is Qwen 3.5 9B with a decision head): found from
+    // "<arch>.decision.type", a wide ubatch, a 4k cap and no chat sampling.
+    Gguf clef;
+    clef.kv("general.architecture", "qwen35").kv("general.name", "Clef Flash Qwen3.5 9B")
+        .kv("qwen35.block_count", 32u).kv("qwen35.attention.head_count", 16u)
+        .kv("qwen35.attention.head_count_kv", 4u).kv("qwen35.embedding_length", 4096u)
+        .kv("qwen35.context_length", 262144u).kv("qwen35.decision.type", "clef");
+    const ps5lm::ModelInfo d = ps5lm::read_model_header("clef-flash-Q4_K_M.gguf", clef.bytes(), 5ull << 30);
+    assert(d.ok && d.decision == "clef");
+    assert(!ps5lm::find_preset(d));
+    const ps5lm::Plan dp = ps5lm::plan_model(d, budget);
+    assert(dp.fits && dp.ctx == 4096 && has_args(dp, "-ub", "2048") && has_args(dp, "-b", "2048"));
+    assert(dp.why.find("decision model (clef)") == 0);
+
+    // The same model without the decision key is a chat model with the narrow batch.
+    Gguf chat;
+    chat.kv("general.architecture", "qwen35").kv("general.name", "Qwen3.5 9B")
+        .kv("qwen35.block_count", 32u).kv("qwen35.attention.head_count", 16u)
+        .kv("qwen35.attention.head_count_kv", 4u).kv("qwen35.embedding_length", 4096u)
+        .kv("qwen35.context_length", 262144u);
+    const ps5lm::ModelInfo c = ps5lm::read_model_header("Qwen3.5-9B-Q4_K_M.gguf", chat.bytes(), 5ull << 30);
+    assert(c.ok && c.decision.empty() && ps5lm::find_preset(c));
+    const ps5lm::Plan cp = ps5lm::plan_model(c, budget);
+    assert(cp.fits && cp.ctx > 4096 && has_args(cp, "-ub", "64"));
+
+    if (argc < 2) {
+        std::puts("model_plan_test: ok (synthetic only)");
+        return 0;
+    }
     bool saw_q2k = false, saw_iq2xxs = false;
-    for (const auto & path : ps5lm::find_models({ dir })) {
+    for (const auto & path : ps5lm::find_models({ argv[1] })) {
         const ps5lm::ModelInfo m = ps5lm::read_model_info(path);
         assert(m.ok);
         const ps5lm::Plan p = ps5lm::plan_model(m, budget);

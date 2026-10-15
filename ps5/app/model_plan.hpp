@@ -21,6 +21,7 @@ struct ModelInfo {
     std::string file_name;
     std::string name;   // general.name, or the file name
     std::string arch;   // general.architecture
+    std::string decision;  // "<arch>.decision.type" (openjev, clef, lfm2-d1, ...): answers /v1/systemone, not chat
     uint64_t    file_bytes      = 0;
     uint32_t    n_layer         = 0;
     uint32_t    n_head_kv       = 0;

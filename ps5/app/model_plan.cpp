@@ -213,6 +213,7 @@ ModelInfo parse_model_info(Reader r, const std::string & path, uint64_t file_byt
         m.name = strs["general.name"];
     }
     const std::string a = m.arch + ".";
+    m.decision = strs[a + "decision.type"];
     auto num = [&](const std::string & k, uint64_t def = 0) {
         auto it = ints.find(a + k);
         return it == ints.end() ? def : it->second;
@@ -300,6 +301,9 @@ const std::vector<Preset> & presets() {
 }
 
 const Preset * find_preset(const ModelInfo & m) {
+    if (!m.decision.empty()) {
+        return nullptr;  // no sampling: a decision model reads its answers off one forward pass
+    }
     const std::string hay = lower(m.file_name + " " + m.name + " " + m.arch);
     for (const auto & p : presets()) {
         if (hay.find(p.match) != std::string::npos) {
@@ -315,6 +319,10 @@ Plan plan_model(const ModelInfo & m, double budget_gib, uint32_t ctx_cap, const 
     if (preset && preset->max_ctx) {
         ctx_cap = std::min(ctx_cap, preset->max_ctx);
     }
+    // Decision prompts are short; 4k keeps the cache small for the wide batch below.
+    if (!m.decision.empty()) {
+        ctx_cap = std::min<uint32_t>(ctx_cap, 4096);
+    }
     if (m.n_ctx_train) {
         ctx_cap = std::min(ctx_cap, m.n_ctx_train);
     }
@@ -324,7 +332,12 @@ Plan plan_model(const ModelInfo & m, double budget_gib, uint32_t ctx_cap, const 
     // one prompt checkpoint of the recurrent state. Calibrated on the console:
     // Qwen3.8-27B UD-Q2_K_XL at 64k with a q4_0 cache ran with 11.38 GiB free.
     // ponytail: 0.25 GiB for the image encoder's buffers is a guess; measure on the console.
-    p.reserve_gib = 0.75 + p.state_gib + (m.mmproj.empty() ? 0.0 : 0.25);
+    // Decision models (laya, clef, vllm-d3, lfm2-d1-omni) and non-causal image
+    // encoders (mtmd caps an image to the ubatch) need a whole prompt or image in
+    // one ubatch, so they get 2048, the size #13 ran on the console.
+    const bool wide = !m.decision.empty() || !m.mmproj.empty();
+    // shortcut: 0.5 GiB more compute buffer for the 2048 ubatch is a guess; measure on the console.
+    p.reserve_gib = 0.75 + p.state_gib + (m.mmproj.empty() ? 0.0 : 0.25) + (wide ? 0.5 : 0.0);
 
     // The longest context first, and at each length the best cache that fits.
     static const uint32_t ctxs[]  = { 131072, 65536, 32768, 16384, 8192, 4096 };
@@ -364,13 +377,14 @@ Plan plan_model(const ModelInfo & m, double budget_gib, uint32_t ctx_cap, const 
         p.why = why;
         return p;
     }
-    std::snprintf(why, sizeof(why), "%uk context, %s cache%s: %.1f of %.1f GiB", p.ctx / 1024, p.kv_type.c_str(),
-                  m.mmproj.empty() ? "" : ", images", p.total_gib, budget_gib);
+    std::snprintf(why, sizeof(why), "%s%uk context, %s cache%s: %.1f of %.1f GiB",
+                  m.decision.empty() ? "" : ("decision model (" + m.decision + "), ").c_str(), p.ctx / 1024,
+                  p.kv_type.c_str(), m.mmproj.empty() ? "" : ", images", p.total_gib, budget_gib);
     p.why = why;
 
     p.args = { "-m", m.path, "-ngl", "999", "-fit", "off", "-lm", "none",
                "-c", std::to_string(p.ctx), "-fa", "on", "-ctk", p.kv_type, "-ctv", p.kv_type,
-               "-b", "256", "-ub", "64", "-np", "1",
+               "-b", wide ? "2048" : "256", "-ub", wide ? "2048" : "64", "-np", "1",
                // One prompt checkpoint and no RAM cache: llama-server's defaults
                // (32 checkpoints, 8 GiB) are for a PC, and the CPU shares this pool.
                "-ctxcp", "1", "-cram", "0",

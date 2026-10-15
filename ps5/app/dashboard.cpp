@@ -30,11 +30,11 @@ namespace {
 
 // ---- the design language (Pulse Dashboard's) --------------------------------
 
-const Color kInk         = Color::rgb(0xe9eefc);
+const Color kInk         = Color::rgb(0xf2f2f7);
 const Color kClear       = Color::rgb(0x000000, 0.0f);
 const Color kBlack       = Color::rgb(0x000000);
-const Color kPanelTop    = Color::rgb(0x171f33);
-const Color kPanelBottom = Color::rgb(0x0e1424);
+const Color kPanelTop    = Color::rgb(0x17171f);
+const Color kPanelBottom = Color::rgb(0x0e0e14);
 const Color kCyan        = Color::rgb(0x4fe0ff);  // speed and the GPU
 const Color kLime        = Color::rgb(0xb8f26b);  // the CPU and the model
 const Color kAmber       = Color::rgb(0xffc24a);  // memory
@@ -1149,8 +1149,8 @@ void Dashboard::draw_header(gfx::DrawList & list) const {
     const float in = tween::stagger(age_, 0, 0.05f, 0.5f);
     list.push_opacity(in);
     const float y = 124 - 10.0f * (1.0f - in);
-    float       w = ui::text(list, fonts_.display, "PS5LM", kGridX - 3, y, 56, kInk);
-    w += ui::text(list, fonts_.display, " Plus", kGridX - 3 + w, y, 56, kBrand);
+    float       w = ui::text(list, fonts_.display, "PS5", kGridX - 3, y, 56, kInk);
+    w += ui::text(list, fonts_.display, "LM", kGridX - 3 + w, y, 56, kBrand);
     std::string sub = "v" PS5LM_VERSION "  \xC2\xB7  " + live_.address;
     ui::text(list, fonts_.regular, sub, kGridX + w + 24, y, 24, kInk.with_alpha(kMuted));
 
@@ -1382,7 +1382,7 @@ void Dashboard::draw_usage_details(gfx::DrawList & list, const Rect & panel) con
     const bool serving = L.state == ServerState::ready || L.state == ServerState::generating;
     char text[96];
     caps(list, f, "USAGE", panel.x + 56, panel.y + 60, 20, kCyan);
-    ui::text(list, f.regular, "What the console is doing for PS5LM Plus, over the last two minutes.", panel.x + 56,
+    ui::text(list, f.regular, "What the console is doing for PS5LM, over the last two minutes.", panel.x + 56,
              panel.y + 96, 20, kInk.with_alpha(kMuted));
 
     const float x0 = panel.x + 56, colw = (panel.w - 112 - 48) * 0.5f, x1 = x0 + colw + 48;

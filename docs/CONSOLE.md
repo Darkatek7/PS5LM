@@ -78,7 +78,7 @@ At exit, Sony's libc prints `[SceLibc] A heap error is detected` (SceLibcInterna
 
 ## The native app on the GPU
 
-PS5LM's app (`ps5/app`, PPSA99581) is a title, not a payload: it gets the console's direct memory and the GPU, through ggml-vulkan on PS5_Vulkan's RADV.
+PS5LM's app (`ps5/app`, PPSA99575) is a title, not a payload: it gets the console's direct memory and the GPU, through ggml-vulkan on PS5_Vulkan's RADV.
 
 | What | Value |
 |---|---|

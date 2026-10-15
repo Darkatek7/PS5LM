@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Packages the built app for a release: build/release/ps5lm-app-v<version>.zip
-# holding the PPSA99581 title folder, plus its sha256. The version comes from
+# holding the app's title folder (PPSA99575), plus its sha256. The version comes from
 # ps5/app/version.hpp; the git tag is v<version>.
 #
 #   scripts/build-app.sh && scripts/release-app.sh

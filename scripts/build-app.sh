@@ -197,13 +197,13 @@ rm -rf -- "$app"
 mkdir -p "$app/sce_sys" "$app/sce_module"
 "$tool" self --sign --in "$out/eboot.elf" --out "$app/eboot.bin" --magic 0x1D3D154F
 cp "$param" "$app/sce_sys/param.json"
-# The home screen backgrounds (3840x2160 BC7 DDS) are made from the SVG in
-# ps5/app/sce_sys/source by PS5_Vulkan's asset tools, and only when it changes.
-if [ ! -f "$sce_sys/pic0.dds" ] || [ "$sce_sys/source/background.svg" -nt "$sce_sys/pic0.dds" ]; then
+# The home screen backgrounds (3840x2160 BC7 DDS) are made from source/background.png
+# (scripts/render-artwork.sh renders it from the SVG) by PS5_Vulkan's asset tools,
+# and only when it changes.
+if [ ! -f "$sce_sys/pic0.dds" ] || [ "$sce_sys/source/background.png" -nt "$sce_sys/pic0.dds" ]; then
     mkdir -p "$out/assets"
-    magick "$sce_sys/source/background.svg" "$out/assets/background.png"
     (cd "$vk" && bash tools/setup-asset-dependencies.sh > /dev/null &&
-        bash tools/prepare-assets.sh --icon "$sce_sys/icon0.png" --background "$out/assets/background.png" \
+        bash tools/prepare-assets.sh --icon "$sce_sys/icon0.png" --background "$sce_sys/source/background.png" \
             --output-directory "$out/assets" > /dev/null)
     cp "$out/assets/pic0.dds" "$out/assets/pic1.dds" "$sce_sys/"
 fi

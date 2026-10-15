@@ -100,6 +100,7 @@ using namespace ps5lm;
 constexpr const char * kLog         = "/data/PS5LM/app.log";
 constexpr const char * kArgs        = "/data/PS5LM/app-args.txt";
 constexpr const char * kChoice      = "/data/PS5LM/model.txt";
+constexpr const char * kTextOnly    = "/data/PS5LM/text-only";  // the last load's projector failed: load without it once
 constexpr const char * kQuit        = "/data/PS5LM/quit";
 constexpr const char * kSettings    = "/data/PS5LM/settings.json";
 constexpr const char * kScratch     = "/data/PS5LM/scratch";
@@ -631,6 +632,17 @@ int main(int, char **) {
             args = models.args_for(path, model_part);
         }
     }
+    // A projector this llama.cpp cannot read stops the server (#15); the
+    // restart after it loads the same model text only, this once.
+    if (access(kTextOnly, F_OK) == 0) {
+        unlink(kTextOnly);
+        const auto mm = std::find(args.begin(), args.end(), "--mmproj");
+        if (mm != args.end()) {
+            std::printf("ps5lm-app: loading without %s\n", mm + 1 != args.end() ? (mm + 1)->c_str() : "the projector");
+            args.erase(mm, std::min(mm + 2, args.end()));
+            model_part.args = args;
+        }
+    }
     log_memory("before loading");
     if (!args.empty()) {
         models.start(path, args, stats, model_part);
@@ -686,7 +698,17 @@ int main(int, char **) {
         Live live = stats.snapshot();
         if (g_server_rc >= 0 && live.state != ServerState::failed && live.state != ServerState::no_model) {
             stats.set_state(ServerState::failed);
-            notify("PS5LM Plus: the server stopped, see /data/PS5LM/llama.log");
+            const bool projector = std::find(g_server_args.begin(), g_server_args.end(), "--mmproj") != g_server_args.end();
+            if (live.state == ServerState::loading && projector && restart_at == 0) {
+                std::ofstream(kChoice) << models.running << "\n";
+                std::ofstream(kTextOnly) << models.running << "\n";
+                notify("PS5LM Plus: the image projector did not load; loading the model text only");
+                dash.set_busy("Loading " + base_name(models.running) + " text only",
+                              "Its image projector did not load, see /data/PS5LM/llama.log");
+                restart_at = n + 3;
+            } else {
+                notify("PS5LM Plus: the server stopped, see /data/PS5LM/llama.log");
+            }
         }
         const bool serving = live.state == ServerState::ready || live.state == ServerState::generating;
         if (serving && !was_serving) {

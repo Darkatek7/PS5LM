@@ -75,3 +75,33 @@ At exit, Sony's libc prints `[SceLibc] A heap error is detected` (SceLibcInterna
 - Programs need an absolute path; a relative one, and very long command lines, end with exit code 3 ("command not found").
 - `kill` takes no `-9`; Payload Manager's `/process_kill?pid=N` works.
 - `browse <URL>` opens the PS5's web browser.
+
+## The native app on the GPU
+
+PS5LM's app (`ps5/app`, PPSA99581) is a title, not a payload: it gets the console's direct memory and the GPU, through ggml-vulkan on PS5_Vulkan's RADV.
+
+| What | Value |
+|---|---|
+| Direct memory for the title | 12 GiB; RADV reports one 11.44 GiB device heap with `radv_enable_unified_heap_on_apu` (8 GiB without) |
+| Device | PlayStation 5 GPU (RADV NAVI21), Vulkan 1.4 |
+| Qwen3.8-27B UD-IQ2_XXS, `-ngl 999 -lm none -c 4096 -ub 64` | loads in 82 s |
+| Prompt | 35 to 50 tok/s |
+| Generation | 21 tok/s on a short prompt, 9 tok/s after the web UI's 371-token prompt |
+
+What a title has to do differently from a payload, each found by a crash:
+
+- **Never exit.** `exit()` and `_Exit` end in SIGSYS; the title waits for the shell to close it, as ps5-native-app-boilerplate's examples do. It hides the splash screen itself and posts notifications to show its state.
+- **Imports that resolve to nothing.** Functions only `libScePosixForWebKit` or `libkernel_sys` define in the SDK's stubs are null in a title: `isatty` (llama.cpp's log setup jumped to address 0), `getnameinfo`, `mkstemp`, `readlink`, `link`, `symlink`, `pathconf`, `fork`. `ps5/app/compat_app.c` defines them, in an archive so the title exports nothing.
+- **The SDK fork's `getaddrinfo` always fails**, and cpp-httplib resolves even the address it binds; `compat_app.c` has a numeric one. Its `accept4` is the title's own too, and logs `errno` when `accept` fails: with the payload's version the listener stopped 20 s into the first run.
+- **No `HOME`**: llama.cpp throws looking for its cache directory without one.
+- C++ exceptions and RTTI are off by default for the PS5 target and must be turned on for llama.cpp.
+
+### Switching models
+
+Unloading a model in the running app leaves part of its GPU memory held: with Qwen3.8-27B UD-IQ2_XXS at 64k, the pool went from 11.01 GiB free before loading to 5.77 GiB free after `llama_server` returned, and ggml's Vulkan figure fell the same way, so the next model could not get its KV cache. The app therefore changes model by restarting itself: it writes the choice to `/data/PS5LM/model.txt` (read once by the new process, then deleted, so a plain launch loads nothing and opens the library) and calls `sceSystemServiceLoadExec("/app0/eboot.bin", NULL)`. The system replaces the process (`Kill for LoadExec(0x11d) => 0`, then a new `EXEC`) without the crash reporter, and the new process starts from the whole pool (11.01 GiB free). Where the memory is held is still open.
+
+### The dashboard on the console
+
+ps5-homebrew-ui draws through ps5-opengl in the same title as RADV: the GL stack is linked as one object with only its GL/EGL API global (4,399 symbol names collide with RADV's Mesa otherwise), `sceAgcInit` runs once for both drivers (`--wrap`), and the GL runtime's thread-local initialiser `_ZTH23_mesa_glapi_tls_Context` is an empty function, as ProsperoAI has it. The screen costs about 0.35 GiB of the pool (11.38 to 11.03 GiB free). The app can be driven from a PC without a controller: `scripts/ps5lm-app.sh close|deploy|launch|screenshot|load|unload`.
+
+ShadowMountPlus registers a title once and copies its icon and backgrounds then; replacing them later needs a re-registration. Uninstalling to force one hit "Register failed: TitleDir bridge unavailable" after ShadowMountPlus had logged `stale cave bridge detached`; reloading ShadowMountPlus fixed it.

@@ -340,7 +340,9 @@ void StatsCollector::run() {
         const double wall = now_s(), cpu = cpu_seconds();
 
         const std::string m = http_get(port_, "/metrics");
-        const bool        up = !m.empty();
+        // Only real metrics: while the model loads the server already answers,
+        // with 503 "Loading model", and that is not ready.
+        const bool        up = m.find("llamacpp:") != std::string::npos;
         const double busy_s = metric(m, "prompt_seconds_total") + metric(m, "tokens_predicted_seconds_total");
         const double tokens = metric(m, "tokens_predicted_total");
         const double gen_s  = metric(m, "tokens_predicted_seconds_total");

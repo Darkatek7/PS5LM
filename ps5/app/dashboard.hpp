@@ -120,6 +120,7 @@ class Dashboard {
     std::string busy_title_, busy_text_;
     hui::ui::InputPrompt prompt_;          // a message typed on Home
     int   demo_ = 0;                       // the next demo to send
+    float load_shown_ = 0;                 // the load's share as drawn, eased between samples
     bool  was_serving_ = false;              // for the sound when a model becomes ready
     std::vector<std::string> unfinished_;    // downloads not saved yet, for the sound when one is
 

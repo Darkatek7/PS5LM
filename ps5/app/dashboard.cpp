@@ -581,6 +581,10 @@ void Dashboard::update(const hui::InputFrame & raw, float dt, ui::Feedback & fee
     clock_ += dt;
     page_age_ += dt;
 
+    // The load's share moves on every frame, not once a second as it is measured.
+    const float load = live_.state == ServerState::loading ? std::max(0.0f, live_.load_progress) : 0.0f;
+    load_shown_ = load < load_shown_ ? load : load_shown_ + (load - load_shown_) * std::min(1.0f, dt * 2.5f);
+
     // Two sounds come from events, not buttons: a model ready, a download saved.
     const bool serving = live_.state == ServerState::ready || live_.state == ServerState::generating;
     if (serving && !was_serving_) {
@@ -1185,16 +1189,23 @@ void Dashboard::draw_home(gfx::DrawList & l) const {
         put(l, f.regular, "Choose a model", kLeft, 340, 64, kInk);
         put(l, f.regular, "It runs on the PS5's GPU and answers every device on your network.", kLeft, 400, 24, kInk2);
         put(l, f.regular, format("%.0f models on this PS5", (double) live_.models.size()), kLeft, 444, 24, kInk3);
+        if (!live_.address.empty()) {
+            put(l, f.regular, "On your network", kLeft, 540, 22, kInk3);
+            put(l, f.regular, "http://" + live_.address, kLeft, 586, 32, kInk2);
+        }
     } else {
         std::string name, build;
         split_name(live_.model_label, &name, &build);
-        put(l, f.regular, decision ? "Decision model" : "Language model", kLeft, 250, 26, kInk2);
+        put(l, f.regular, !live_.phase.empty() ? "Starting" : decision ? "Decision model" : "Language model", kLeft, 250, 26,
+            kInk2);
         put(l, f.regular, f.regular.font->fit(name, 64, 860), kLeft, 326, 64, kInk);
         std::string detail = build;
         if (live_.ctx > 0) {
             detail += (detail.empty() ? "" : "    ") + format("%.0fk context", live_.ctx / 1024.0);
         }
-        detail += (detail.empty() ? "" : "    ") + gb(live_.model_gib);
+        if (live_.model_gib > 0) {
+            detail += (detail.empty() ? "" : "    ") + gb(live_.model_gib);
+        }
         put(l, f.regular, detail, kLeft, 372, 24, kInk3);
 
         // The state, as a car shows its gear: one word, coloured only when it matters.
@@ -1206,13 +1217,17 @@ void Dashboard::draw_home(gfx::DrawList & l) const {
                         : live_.state == ServerState::loading ? kInk2.with_alpha(0.5f + 0.5f * std::sin(clock_ * 4.0f)) : kGreen;
         l.circle(kLeft + 7, 432, 7, dot);
         put(l, f.regular, word, kLeft + 26, 441, 26, kInk);
+        // Where the network reaches it, on the same line.
+        if (!live_.address.empty()) {
+            put(l, f.regular, "http://" + live_.address, kLeft + 860, 441, 26, kInk2, gfx::Align::right);
+        }
 
         // The large number: speed while serving, progress while loading.
         float big = 0;
         std::string unit;
         bool known = true;
         if (live_.state == ServerState::loading) {
-            big = std::max(0.0f, live_.load_progress) * 100.0f;
+            big = load_shown_ * 100.0f;
             unit = "% on the GPU";
         } else if (decision) {
             // Time per decision (one question answered) over the latest requests:
@@ -1250,7 +1265,32 @@ void Dashboard::draw_home(gfx::DrawList & l) const {
         put(l, f.regular, unit, kLeft + nw + 12, 660, 26, kInk2);
 
         if (live_.state == ServerState::loading) {
-            meter(l, kLeft, 712, 860, live_.load_progress, kInk);
+            // The model's memory as cells filling column by column, the newest
+            // lit and a slow wave over the rest; before the load starts, a light
+            // sweeping the empty ones. It never looks stopped.
+            constexpr int cols = 60, rows = 4;
+            const float cw = (860.0f - 3.0f * (cols - 1)) / cols, ch = 18;
+            const int filled = (int) (load_shown_ * cols * rows);
+            const float sweep = (0.5f + 0.5f * std::sin(clock_ * 1.7f)) * (cols - 1);
+            for (int c = 0; c < cols; ++c) {
+                for (int r = 0; r < rows; ++r) {
+                    const int i = c * rows + r;
+                    const Color cell = i < filled ? kInk.with_alpha(0.45f + 0.4f * (0.5f + 0.5f * std::sin(clock_ * 3.0f - (float) c * 0.22f)))
+                                     : i == filled ? kBlue.with_alpha(0.6f + 0.4f * std::sin(clock_ * 8.0f))
+                                     : filled == 0 ? gfx::mix(kHair, kInk3, std::max(0.0f, 1.0f - std::fabs((float) c - sweep) / 4.0f))
+                                                   : kHair;
+                    l.rounded_rect({ kLeft + (cw + 3) * (float) c, 700 + (ch + 3) * (float) r, cw, ch }, 3, cell);
+                }
+            }
+            const double total = live_.model_gib + live_.kv_gib;
+            put(l, f.regular,
+                !live_.phase.empty() ? live_.phase
+                : live_.load_progress < 0.985f ? std::string("Copying the weights into GPU memory") : std::string("Preparing the context"),
+                kLeft, 822, 22, kInk2);
+            if (total > 0) {
+                put(l, f.regular, format("%.1f", load_shown_ * total) + " of " + gb(total), kLeft + 860, 822, 22, kInk3,
+                    gfx::Align::right);
+            }
         } else if (!decision) {
             trace(l, live_.gen_history, { kLeft, 702, 860, 100 }, kInk.with_alpha(0.75f));
         }
@@ -1268,20 +1308,19 @@ void Dashboard::draw_home(gfx::DrawList & l) const {
         meter(l, kLeft + 460, my + 16, 400, live_.ctx > 0 ? (float) live_.ctx_used / (float) live_.ctx : 0, kInk.with_alpha(0.8f));
     }
 
-    // Right: where the model is reached, and what the network asks of it, as
-    // it happens. A single panel, as a car gives the map.
+    // Right: what the network asks of it, as it happens. A single panel, as a
+    // car gives the map, with what it has done since it started at the top,
+    // like a trip meter.
     const Rect p{ 1056, 196, kRight - 1056, 728 };
     l.rounded_rect(p, 24, kSurface);
     const float x = p.x + 56, w = p.w - 112;
-    put(l, f.regular, "On your network", x, p.y + 70, 22, kInk2);
-    const std::string url = live_.address.empty() ? std::string("Not connected") : "http://" + live_.address;
-    put(l, f.regular, f.regular.font->fit(url, 40, w), x, p.y + 124, 40, live_.address.empty() ? kInk3 : kInk);
-    put(l, f.regular,
-        !loaded ? "Load a model and it answers here"
-        : decision ? "TypeSafe decisions at /v1/systemone"
-                   : "OpenAI, Anthropic and a chat page",
-        x, p.y + 162, 22, kInk3);
-    l.line(x, p.y + 196, x + w, p.y + 196, 1.5f, kHair);
+    put(l, f.regular, "Requests", x, p.y + 62, 22, kInk2);
+    std::string trip = thousands(live_.served) + " answered    " + thousands(live_.prompt_tokens) + " tokens in";
+    if (!decision) {
+        trip += "    " + thousands(live_.tokens) + " out";
+    }
+    put(l, f.regular, trip, x + w, p.y + 62, 20, kInk3, gfx::Align::right);
+    l.line(x, p.y + 90, x + w, p.y + 90, 1.5f, kHair);
 
     // The conversation: what each device asked, on the right as a message
     // sent, and the model's answer under it on the left, newest at the bottom
@@ -1303,7 +1342,7 @@ void Dashboard::draw_home(gfx::DrawList & l) const {
             lines.back() = f.regular.font->fit(lines.back() + " \xE2\x80\xA6", 22, width);
         }
     };
-    const float top = p.y + 222, bottom = p.y + p.h - 70;
+    const float top = p.y + 112, bottom = p.y + p.h - 30;
     std::vector<Turn> turns;
     float total = 0;
     for (auto it = live_.activity.rbegin(); it != live_.activity.rend(); ++it) {
@@ -1373,13 +1412,6 @@ void Dashboard::draw_home(gfx::DrawList & l) const {
         }
         y += 28 + 26;
     }
-
-    // What it has done since it started, like a trip meter.
-    std::string trip = thousands(live_.served) + " requests    " + thousands(live_.prompt_tokens) + " tokens in";
-    if (!decision) {
-        trip += "    " + thousands(live_.tokens) + " out";
-    }
-    put(l, f.regular, trip, x, p.y + p.h - 40, 20, kInk3);
 }
 
 // ---- drawing: Models ------------------------------------------------------------------

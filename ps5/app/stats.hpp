@@ -108,6 +108,7 @@ struct Live {
 
     // Loading: how much of the model and its cache is on the GPU, 0..1, or -1.
     float load_progress = -1;
+    std::string phase;  // what the app does before the load can start ("Opening the GPU"), or empty
 
     // Session.
     double   uptime_s  = 0;
@@ -131,6 +132,7 @@ class StatsCollector {
     void set_models(const std::vector<ModelRow> & rows);
     void set_state(ServerState s);
     void set_scratch(double gib);
+    void set_phase(std::string phase);
     // From llama-server's HTTP threads, through activity.cpp.
     void activity_begin(int id, std::string client, std::string path, std::string asked, int questions);
     void activity_text(int id, const std::string & text);

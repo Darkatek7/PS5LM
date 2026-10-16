@@ -54,6 +54,7 @@ bool load_font(hui::gfx::Renderer & r, const std::string & path, hui::gfx::Font 
 float g_loading = -1;  // >= 0: draw the loading state at this progress
 bool  g_decision = false;  // d1 Omni 600M instead of Qwen 3.8
 bool  g_empty = false;     // nothing loaded
+std::string g_phase;       // the app still starting
 
 ps5lm::Live sample(float seconds, bool generating) {
     ps5lm::Live L;
@@ -212,6 +213,7 @@ ps5lm::Live sample(float seconds, bool generating) {
     if (g_loading >= 0) {
         L.state = ps5lm::ServerState::loading;
         L.load_progress = g_loading;
+        L.phase = g_phase;
         L.free_gib = 11.03 - g_loading * (L.model_gib + L.kv_gib);
         L.gen_tps = 0;
         L.gpu_busy = 0;
@@ -378,6 +380,11 @@ int main(int argc, char ** argv) {
 
     using D = hui::Direction;
     using A = hui::Action;
+    g_loading = 0;
+    g_phase = "Opening the GPU and reading the models";
+    step(50, {}, false);
+    shot("00-home-starting");
+    g_phase.clear();
     g_loading = 0.45f;
     step(90, {}, false);
     shot("00-home-loading");

@@ -27,6 +27,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <span>
 #include <string>
@@ -538,6 +539,19 @@ struct Models {
     }
 };
 
+// A thread with a 16 MiB stack, as llama-server's: the console's default is small.
+pthread_t start_thread(std::function<void()> & fn) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 16u << 20);
+    pthread_t t{};
+    pthread_create(&t, &attr, [](void * p) -> void * {
+        (*static_cast<std::function<void()> *>(p))();
+        return nullptr;
+    }, &fn);
+    return t;
+}
+
 bool load_font(hui::gfx::Renderer & renderer, const char * name, hui::gfx::Font * font, hui::ui::FontRef * ref) {
     std::string data;
     const std::string path = std::string(kAssets) + "/fonts/" + name;
@@ -617,8 +631,7 @@ int main(int, char **) {
         renderer.draw(frame.overlay);
         display.present(renderer);
     };
-    // The splash before the slow part (the GPU opening, every model's header
-    // read), so a restart for a model is never a black screen.
+    // The splash at once, so a restart for a model is never a black screen.
     if (ui_ok) {
         dash.set_busy("Starting", "Opening the GPU and reading the models");
         render();
@@ -626,78 +639,125 @@ int main(int, char **) {
     }
     sceSystemServiceHideSplashScreen();
 
-    Models models;
-    for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
-        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-        size_t free = 0, total = 0;
-        ggml_backend_dev_memory(dev, &free, &total);
-        std::printf("ps5lm-app: device %zu %s (%s): %.2f / %.2f GiB free\n", i, ggml_backend_dev_name(dev),
-                    ggml_backend_dev_description(dev), free / 1073741824.0, total / 1073741824.0);
-        // The PS5 is an APU: ggml calls its GPU integrated.
-        const auto type = ggml_backend_dev_type(dev);
-        if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
-            models.budget_gib = free / 1073741824.0;
-        }
-    }
-
     StatsCollector stats;
     stats.start(kPort);
     set_activity_sink(&stats);  // llama-server's request hooks (patches/0007) report here
+    Models models;
     models.settings = load_settings(kSettings);
-    models.scan(stats);
-
-    // Which model: app-args.txt verbatim, else model.txt, which the library
-    // writes just before restarting the app for a switch and which is used
-    // once, else the default model when Settings asks for it at launch. A
-    // plain launch otherwise loads nothing and opens the library.
-    Live model_part;
-    std::vector<std::string> args = read_lines(kArgs);
-    std::string path;
-    if (!args.empty()) {
-        const auto m = std::find(args.begin(), args.end(), "-m");
-        path = m != args.end() && m + 1 != args.end() ? *(m + 1) : "";
-        model_part.model_label = base_name(path);
-        const ModelInfo info = read_model_info(path);
-        model_part.model_arch = info.arch;
-        model_part.model_gib = info.file_bytes / 1073741824.0;
-        model_part.model_file = path;
-        model_part.args = args;
-        std::printf("ps5lm-app: app-args.txt overrides the planner\n");
-    } else {
-        auto chosen = read_lines(kChoice);
-        unlink(kChoice);
-        if (chosen.empty() && models.settings.auto_load && !models.settings.default_model.empty()) {
-            chosen = { models.settings.default_model };  // "none" after an unload keeps it from coming back
+    // The model about to load, by name, for Home while the GPU opens.
+    {
+        std::vector<std::string> next = read_lines(kArgs);
+        const auto m = std::find(next.begin(), next.end(), "-m");
+        next = m != next.end() && m + 1 != next.end() ? std::vector<std::string>{ *(m + 1) } : read_lines(kChoice);
+        if (next.empty() && models.settings.auto_load) {
+            next = { models.settings.default_model };
         }
-        for (const auto & r : models.rows) {
-            if (r.fits && !chosen.empty() && r.file == chosen[0]) {
-                path = r.file;
+        if (!next.empty() && !next[0].empty() && next[0] != "none") {
+            Live pending;
+            pending.model_label = base_name(next[0]);
+            stats.set_model(pending);
+            stats.set_state(ServerState::loading);
+        }
+        stats.set_phase("Opening the GPU and reading the models");
+    }
+
+    // The slow part on a thread of its own (the GPU opening, every model's
+    // header, the model's start) while the screen keeps moving: the splash
+    // for a moment, then Home, where the load shows.
+    std::function<void()> boot = [&] {
+        for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            size_t free = 0, total = 0;
+            ggml_backend_dev_memory(dev, &free, &total);
+            std::printf("ps5lm-app: device %zu %s (%s): %.2f / %.2f GiB free\n", i, ggml_backend_dev_name(dev),
+                        ggml_backend_dev_description(dev), free / 1073741824.0, total / 1073741824.0);
+            // The PS5 is an APU: ggml calls its GPU integrated.
+            const auto type = ggml_backend_dev_type(dev);
+            if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
+                models.budget_gib = free / 1073741824.0;
             }
         }
-        if (!path.empty()) {
-            args = models.args_for(path, model_part);
-        }
-    }
-    // A projector this llama.cpp cannot read stops the server (#15); the
-    // restart after it loads the same model text only, this once.
-    if (access(kTextOnly, F_OK) == 0) {
-        unlink(kTextOnly);
-        const auto mm = std::find(args.begin(), args.end(), "--mmproj");
-        if (mm != args.end()) {
-            std::printf("ps5lm-app: loading without %s\n", mm + 1 != args.end() ? (mm + 1)->c_str() : "the projector");
-            args.erase(mm, std::min(mm + 2, args.end()));
+
+        models.scan(stats);
+
+        // Which model: app-args.txt verbatim, else model.txt, which the library
+        // writes just before restarting the app for a switch and which is used
+        // once, else the default model when Settings asks for it at launch. A
+        // plain launch otherwise loads nothing and opens the library.
+        Live model_part;
+        std::vector<std::string> args = read_lines(kArgs);
+        std::string path;
+        if (!args.empty()) {
+            const auto m = std::find(args.begin(), args.end(), "-m");
+            path = m != args.end() && m + 1 != args.end() ? *(m + 1) : "";
+            model_part.model_label = base_name(path);
+            const ModelInfo info = read_model_info(path);
+            model_part.model_arch = info.arch;
+            model_part.model_gib = info.file_bytes / 1073741824.0;
+            model_part.model_file = path;
             model_part.args = args;
+            std::printf("ps5lm-app: app-args.txt overrides the planner\n");
+        } else {
+            auto chosen = read_lines(kChoice);
+            unlink(kChoice);
+            if (chosen.empty() && models.settings.auto_load && !models.settings.default_model.empty()) {
+                chosen = { models.settings.default_model };  // "none" after an unload keeps it from coming back
+            }
+            for (const auto & r : models.rows) {
+                if (r.fits && !chosen.empty() && r.file == chosen[0]) {
+                    path = r.file;
+                }
+            }
+            if (!path.empty()) {
+                args = models.args_for(path, model_part);
+            }
+        }
+        // A projector this llama.cpp cannot read stops the server (#15); the
+        // restart after it loads the same model text only, this once.
+        if (access(kTextOnly, F_OK) == 0) {
+            unlink(kTextOnly);
+            const auto mm = std::find(args.begin(), args.end(), "--mmproj");
+            if (mm != args.end()) {
+                std::printf("ps5lm-app: loading without %s\n", mm + 1 != args.end() ? (mm + 1)->c_str() : "the projector");
+                args.erase(mm, std::min(mm + 2, args.end()));
+                model_part.args = args;
+            }
+        }
+        log_memory("before loading");
+        if (!args.empty()) {
+            models.start(path, args, stats, model_part);
+        } else {
+            stats.set_state(ServerState::no_model);
+            if (models.rows.empty()) {
+                notify("PS5LM: no models; copy a .gguf to /data/PS5LM/models or PS5LM/models on a USB drive");
+            }
+        }
+        stats.set_phase("");
+    };
+    std::atomic<bool> booted{ false };
+    std::function<void()> boot_then = [&] {
+        boot();
+        booted = true;
+    };
+    const pthread_t booting = start_thread(boot_then);
+    {
+        hui::ui::Feedback quiet;  // no sounds yet: the mixer starts after
+        const int64_t start = hui::sys::monotonic_us();
+        int64_t at = start;
+        while (ui_ok && !booted) {
+            const int64_t now = hui::sys::monotonic_us();
+            if (now - start > 1200000) {
+                dash.set_busy("");
+            }
+            dash.set_live(stats.snapshot());
+            quiet.clear();
+            dash.update(hui::InputFrame{}, std::min(0.05f, (float) (now - at) / 1e6f), quiet);
+            at = now;
+            render();
+            display.swap();
         }
     }
-    log_memory("before loading");
-    if (!args.empty()) {
-        models.start(path, args, stats, model_part);
-    } else {
-        stats.set_state(ServerState::no_model);
-        if (models.rows.empty()) {
-            notify("PS5LM: no models; copy a .gguf to /data/PS5LM/models or PS5LM/models on a USB drive");
-        }
-    }
+    pthread_join(booting, nullptr);
 
     // Input and sound, as ps5-homebrew-ui's own app does.
     hui::ps5::Pad pad;

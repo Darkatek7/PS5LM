@@ -257,6 +257,11 @@ void StatsCollector::set_model(const Live & m) {
     live_.args        = m.args;
 }
 
+void StatsCollector::set_phase(std::string phase) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    live_.phase = std::move(phase);
+}
+
 void StatsCollector::set_models(const std::vector<ModelRow> & rows) {
     std::lock_guard<std::mutex> lock(mutex_);
     live_.models = rows;

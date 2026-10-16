@@ -101,6 +101,7 @@ using namespace ps5lm;
 constexpr const char * kLog         = "/data/PS5LM/app.log";
 constexpr const char * kArgs        = "/data/PS5LM/app-args.txt";
 constexpr const char * kChoice      = "/data/PS5LM/model.txt";
+constexpr const char * kEnv         = "/data/PS5LM/env.txt";  // driver and ggml switches, for measuring
 constexpr const char * kTextOnly    = "/data/PS5LM/text-only";  // the last load's projector failed: load without it once
 constexpr const char * kQuit        = "/data/PS5LM/quit";
 constexpr const char * kSettings    = "/data/PS5LM/settings.json";
@@ -565,6 +566,20 @@ int main(int, char **) {
     setenv("radv_enable_unified_heap_on_apu", "true", 1);
     setenv("HOME", "/data/PS5LM", 0);
     setenv("LLAMA_CACHE", "/data/PS5LM/cache", 0);
+    // Driver and backend switches to measure with, one NAME=value a line in
+    // env.txt, set before the GPU opens; only the driver's, ggml's and llama's.
+    for (const auto & line : read_lines(kEnv)) {
+        const size_t eq = line.find('=');
+        const std::string name = line.substr(0, eq == std::string::npos ? 0 : eq);
+        bool known = false;
+        for (const char * prefix : { "RADV_", "MESA_", "ACO_", "GGML_", "LLAMA_" }) {
+            known = known || name.rfind(prefix, 0) == 0;
+        }
+        if (known) {
+            setenv(name.c_str(), line.c_str() + eq + 1, 1);
+        }
+        std::printf("ps5lm-app: env %s%s\n", line.c_str(), known ? "" : " (ignored)");
+    }
     mkdir(kModels, 0777);
     std::printf("ps5lm-app: start\n");
 

@@ -32,6 +32,7 @@ struct Exchange {
     std::string path;       // "/v1/chat/completions"
     std::string asked;      // the last user message, a decision's state, or the prompt
     std::string answered;   // the text answered so far
+    int         questions = 0;  // a decision request's questions, each one decision
     int         status = 0; // the HTTP status once done, 0 while it runs
     double      seconds = 0;  // how long it took, once done
     double      started = 0;  // steady clock, seconds
@@ -129,7 +130,7 @@ class StatsCollector {
     void set_state(ServerState s);
     void set_scratch(double gib);
     // From llama-server's HTTP threads, through activity.cpp.
-    void activity_begin(int id, std::string client, std::string path, std::string asked);
+    void activity_begin(int id, std::string client, std::string path, std::string asked, int questions);
     void activity_text(int id, const std::string & text);
     void activity_end(int id, int status);
 

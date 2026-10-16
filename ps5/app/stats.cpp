@@ -265,13 +265,14 @@ double steady_s() {
 
 }  // namespace
 
-void StatsCollector::activity_begin(int id, std::string client, std::string path, std::string asked) {
+void StatsCollector::activity_begin(int id, std::string client, std::string path, std::string asked, int questions) {
     std::lock_guard<std::mutex> lock(mutex_);
     Exchange e;
     e.id = id;
     e.client = std::move(client);
     e.path = std::move(path);
     e.asked = std::move(asked);
+    e.questions = questions;
     e.started = steady_s();
     live_.activity.push_back(std::move(e));
     if (live_.activity.size() > 6) {

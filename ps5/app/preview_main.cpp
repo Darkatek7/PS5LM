@@ -187,12 +187,12 @@ ps5lm::Live sample(float seconds, bool generating) {
         L.free_gib = 8.6;
         L.activity.clear();
         ps5lm::Exchange a;
-        a.id = 130; a.client = "192.168.1.40"; a.path = "/v1/systemone"; a.status = 200; a.seconds = 0.3;
+        a.id = 130; a.client = "192.168.1.40"; a.path = "/v1/systemone"; a.status = 200; a.seconds = 0.3; a.questions = 3;
         a.asked = "3 questions: {\"from\": \"promo@cheap-meds.biz\", \"subject\": \"URGENT: you won a free iPhone!!!\"}";
         a.answered = "spam yes 1.00, intent sell, urgency 1.02";
         L.activity.push_back(a);
         a.id = 131; a.asked = "7 questions, 1 image"; a.answered = "text no 0.01, color black, ad no 0.01, people no 0.00, mood 1.00";
-        a.seconds = 2.9; L.activity.push_back(a);
+        a.seconds = 2.9; a.questions = 7; L.activity.push_back(a);
     }
     if (g_empty) {
         L.state = ps5lm::ServerState::no_model;

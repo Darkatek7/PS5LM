@@ -1077,9 +1077,19 @@ void Dashboard::draw_home(gfx::DrawList & l) const {
             big = std::max(0.0f, live_.load_progress) * 100.0f;
             unit = "% on the GPU";
         } else if (decision) {
-            big = live_.prompt_tps;  // as measured, once a second: an eased number flickers on a TV
-            unit = "tokens read per second";
-            known = live_.prompt_tps > 0;
+            // Time per decision (one question answered) over the latest requests:
+            // what a decision model is judged by, as Ollaya reports it.
+            double seconds = 0;
+            int decisions = 0;
+            for (const auto & e : live_.activity) {
+                if (e.status == 200 && e.questions > 0) {
+                    seconds += e.seconds;
+                    decisions += e.questions;
+                }
+            }
+            big = decisions ? (float) (1000.0 * seconds / decisions) : 0;
+            unit = "ms per decision";
+            known = decisions > 0;
         } else {
             big = live_.gen_tps;
             unit = "tokens per second";

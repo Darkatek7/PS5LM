@@ -167,7 +167,8 @@ void ps5lm_activity_begin(int id, const char * method, const char * path, const 
         return;
     }
     const json j = json::parse(body, body + body_len, nullptr, false);
-    g_sink->activity_begin(id, remote ? remote : "", path ? path : "", one_line(asked_from(path ? path : "", j), 400));
+    const int questions = j.is_object() && j.contains("questions") && j["questions"].is_object() ? (int) j["questions"].size() : 0;
+    g_sink->activity_begin(id, remote ? remote : "", path ? path : "", one_line(asked_from(path ? path : "", j), 400), questions);
 }
 
 void ps5lm_activity_data(int id, const char * data, size_t len) {

@@ -1273,7 +1273,11 @@ void Dashboard::draw_suggested(gfx::DrawList & l, const Rect & a) const {
         const float nw = put(l, f.regular, s.name, a.x + 28, y + 36, 26, kInk);
         const double bytes = (double) s.model.bytes + (double) (s.mmproj.file ? s.mmproj.bytes : 0);
         put(l, f.regular, format("%.1f GB", bytes / 1073741824.0), a.x + 28 + nw + 14, y + 36, 21, kInk3);
-        const std::string about = std::string(s.decision ? "Decision" : s.mmproj.file ? "Language, images" : "Language") + "    " + s.about;
+        std::string about = s.decision ? "Decision" : s.mmproj.file ? "Language, images" : "Language";
+        if (s.tps > 0) {
+            about += format("    %.0f tokens a second here", s.tps);
+        }
+        about += std::string("    ") + s.about;
         put(l, f.regular, f.regular.font->fit(about, 20, a.w - 260), a.x + 28, y + 66, 20, kInk3);
         // On the console already, on its way, or ready to get.
         std::string state;
@@ -1544,18 +1548,22 @@ void Dashboard::draw_dialogs(gfx::DrawList & l) const {
     }
 }
 
-// Slow work: a turning arc and what is happening, so a pause never looks like a hang.
+// Slow work, often the app restarting for a model: the whole screen, the
+// name and what is happening, and a bar that keeps moving so a pause never
+// looks like a hang.
 void Dashboard::draw_busy(gfx::DrawList & l) const {
     const ui::Fonts & f = fonts_;
-    const Rect d{ 960 - 440, 540 - 110, 880, 220 };
-    sheet(l, d);
-    const float cx = d.x + 92, cy = d.cy();
-    l.ring(cx, cy, 30, 4, kHair);
-    l.arc(cx, cy, 30, 4, clock_ * 5.0f, 1.4f + 0.8f * std::sin(clock_ * 2.1f), kBlue);
-    put(l, f.semibold, f.semibold.font->fit(busy_title_, 30, d.w - 220), d.x + 156, cy - 6, 30, kInk);
-    if (!busy_text_.empty()) {
-        put(l, f.regular, f.regular.font->fit(busy_text_, 21, d.w - 220), d.x + 156, cy + 32, 21, kInk2);
-    }
+    l.rounded_rect({ 0, 0, 1920, 1080 }, 0, kBase);
+    const float ps5 = f.semibold.measure("PS5", 120), lm = f.semibold.measure("LM", 120);
+    const float x = 960 - (ps5 + lm) * 0.5f;
+    put(l, f.semibold, "PS5", x, 500, 120, kInk);
+    put(l, f.semibold, "LM", x + ps5, 500, 120, kBlue);
+    put(l, f.regular, f.regular.font->fit(busy_title_, 32, 1400), 960, 600, 32, kInk, gfx::Align::center);
+    put(l, f.regular, f.regular.font->fit(busy_text_, 24, 1400), 960, 646, 24, kInk2, gfx::Align::center);
+    const float track = 360, seg = 96;
+    const float t = 0.5f + 0.5f * std::sin(clock_ * 2.4f);
+    l.rounded_rect({ 960 - track * 0.5f, 700, track, 3 }, 1.5f, kHair);
+    l.rounded_rect({ 960 - track * 0.5f + (track - seg) * t, 700, seg, 3 }, 1.5f, kInk);
 }
 
 }  // namespace ps5lm

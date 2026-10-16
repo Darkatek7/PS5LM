@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Bakes the dashboard's typeface, Manrope (OFL, third_party/fonts/manrope), into
-# the SDF .huifont files the app loads from assets/fonts: weight 500 for text,
+# the SDF .huifont files the app loads from assets/fonts, with accented Latin,
+# typographic quotes and dashes (the european set), as models write them: weight 500 for text,
 # 600 for titles and 200 for the large numbers. Needs fontTools and a host clang++.
 set -euo pipefail
 
@@ -17,7 +18,7 @@ from fontTools.ttLib import TTFont
 from fontTools.varLib.instancer import instantiateVariableFont
 instantiateVariableFont(TTFont(sys.argv[1]), {"wght": int(sys.argv[2])}).save(sys.argv[3])' \
         "$src/Manrope[wght].ttf" "$weight" "$tmp/manrope-$weight.ttf"
-    "$tmp/bake_font" "$tmp/manrope-$weight.ttf" "$out/manrope-$weight.huifont" 64 8 1024
+    "$tmp/bake_font" "$tmp/manrope-$weight.ttf" "$out/manrope-$weight.huifont" 64 8 2048 european
 done
 cp "$src/OFL.txt" "$out/manrope-LICENSE.txt"
 echo "bake-fonts: $out"

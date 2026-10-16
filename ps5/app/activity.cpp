@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 
 using json = nlohmann::ordered_json;
 
@@ -95,6 +96,20 @@ std::string asked_from(const std::string & path, const json & j) {
     return {};
 }
 
+// Without emoji, which the TV's fonts lack: 4-byte UTF-8 and U+FE0F go.
+std::string printable(const std::string & s) {
+    std::string out;
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = (unsigned char) s[i];
+        const size_t n = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+        if (n != 4 && s.compare(i, 3, "\xEF\xB8\x8F") != 0) {
+            out.append(s, i, n);
+        }
+        i += n;
+    }
+    return out;
+}
+
 // "spam yes 0.99, intent sell, urgency 1.02"
 std::string answers_of(const json & answers) {
     std::string out;
@@ -156,6 +171,28 @@ namespace ps5lm {
 
 void set_activity_sink(StatsCollector * stats) { g_sink = stats; }
 
+void ask_self(int port, const std::string & text, bool decision) {
+    json body;
+    if (decision) {
+        // Two questions any text answers: what its writer wants, and their mood.
+        body["state"] = text;
+        body["questions"]["intent"] = { { "type", "choice" },
+                                        { "instructions", "What does the writer want?" },
+                                        { "criteria", { { "refund", nullptr }, { "information", nullptr },
+                                                        { "cancel", nullptr }, { "praise", nullptr } } } };
+        body["questions"]["angry"] = { { "type", "noul" }, { "instructions", "Is the writer angry?" } };
+    } else {
+        // Short and without thinking: an answer on the TV in seconds.
+        body["messages"] = json::array({ { { "role", "user" }, { "content", text } } });
+        body["stream"] = true;
+        body["max_tokens"] = 512;
+        body["chat_template_kwargs"] = { { "enable_thinking", false } };
+    }
+    std::thread([port, decision, b = body.dump()] {
+        http_post(port, decision ? "/v1/systemone" : "/v1/chat/completions", b, 300);
+    }).detach();
+}
+
 }  // namespace ps5lm
 
 extern "C" {
@@ -168,7 +205,7 @@ void ps5lm_activity_begin(int id, const char * method, const char * path, const 
     }
     const json j = json::parse(body, body + body_len, nullptr, false);
     const int questions = j.is_object() && j.contains("questions") && j["questions"].is_object() ? (int) j["questions"].size() : 0;
-    g_sink->activity_begin(id, remote ? remote : "", path ? path : "", one_line(asked_from(path ? path : "", j), 400), questions);
+    g_sink->activity_begin(id, remote ? remote : "", path ? path : "", one_line(printable(asked_from(path ? path : "", j)), 400), questions);
 }
 
 void ps5lm_activity_data(int id, const char * data, size_t len) {
@@ -203,6 +240,7 @@ void ps5lm_activity_data(int id, const char * data, size_t len) {
             }
         }
     }
+    out = printable(out);
     if (!out.empty()) {
         g_sink->activity_text(id, out);
     }

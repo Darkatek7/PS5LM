@@ -92,6 +92,8 @@ struct Live {
     bool  sensors_from_exporter = false;  // read from ps5-exporter, not the kernel
     std::vector<float> temp_history;  // SoC degrees C per second
     std::vector<float> power_history; // SoC watts per second
+    // The same four over the last hour, a point per 30 seconds (their mean).
+    std::vector<float> temp_hour, power_hour, gpu_hour, cpu_hour;
     double energy_wh = 0;             // SoC energy since the app started
     std::vector<std::pair<std::string, float>> temps;  // every sensor that answered ("cpu", "soc0", ...)
 
@@ -161,6 +163,13 @@ std::string local_address();
 
 // A tiny HTTP GET over loopback; returns the body, or empty.
 std::string http_get(int port, const char * path, int timeout_s = 1);
+// The same with a JSON body, as a POST; reads the answer to its end.
+std::string http_post(int port, const char * path, const std::string & body, int timeout_s);
+
+// Asks the app's own server, as Home's Message and Demo do, on a thread of its
+// own: a chat message, or for a decision model a text to decide on. It shows
+// in the feed like any other request (activity.cpp).
+void ask_self(int port, const std::string & text, bool decision);
 
 // One value from Prometheus text ("llamacpp:tokens_predicted_total 42").
 double metric(const std::string & text, const char * name);

@@ -17,6 +17,11 @@ v0.1.x are the upstream payload releases by cobanov.
   d1 Omni, Clef, OpenJev and others. The planner gives them a 2048-token batch and a 4k context.
 - MiniCPM-V 4.7's image projector, and the other models of llama.cpp 04f7226.
 - `/data/PS5LM/env.txt`: driver and ggml switches set before the GPU opens, for measuring.
+- **Console** page: temperature, power, GPU and CPU load charted over the last two minutes or the
+  last hour, and a table of every reading.
+- Home's request feed reads as a chat, and the console can ask itself: Square sends a demo
+  request, Triangle opens a keyboard (with Turkish letters) for a message of your own.
+- Settings with several choices open a list under the row; Cross picks, Circle cancels.
 
 ### Changed
 - The app is **PS5LM** under its own title ID, **PPSA99575**, with a new icon and home screen
@@ -26,6 +31,9 @@ v0.1.x are the upstream payload releases by cobanov.
 - Models with an image projector get a 2048-token ubatch, so images are no longer cut to 64 tokens.
 
 ### Fixed
+- The app opens on Home, not on the model list, and draws its splash before the GPU opens, so a
+  restart for a model no longer shows a black screen.
+- One sound for each kind of action, at one pitch: no two actions share a sound by accident.
 - A float in any request (`"temperature": 0.7`) stopped the server: the console's `localeconv()`
   reports an empty decimal point. The app now gives the C locale's.
 - An image projector llama.cpp cannot read no longer stops the server: the app restarts once and

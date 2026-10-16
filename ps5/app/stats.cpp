@@ -124,7 +124,9 @@ long json_int(const std::string & text, const char * key) {
 
 }  // namespace
 
-std::string http_get(int port, const char * path, int timeout_s) {
+std::string http_get(int port, const char * path, int timeout_s) { return http_post(port, path, {}, timeout_s); }
+
+std::string http_post(int port, const char * path, const std::string & body, int timeout_s) {
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         return {};
@@ -141,9 +143,12 @@ std::string http_get(int port, const char * path, int timeout_s) {
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     std::string out;
     if (connect(fd, (sockaddr *) &addr, sizeof(addr)) == 0) {
-        char req[160];
-        const int n = std::snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\nHost: localhost\r\n\r\n", path);
-        send(fd, req, (size_t) n, 0);
+        std::string req = std::string(body.empty() ? "GET " : "POST ") + path + " HTTP/1.0\r\nHost: localhost\r\n";
+        if (!body.empty()) {
+            req += "Content-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
+        }
+        req += "\r\n" + body;
+        send(fd, req.data(), req.size(), 0);
         char buf[4096];
         for (ssize_t got; (got = recv(fd, buf, sizeof(buf), 0)) > 0;) {
             out.append(buf, (size_t) got);
@@ -153,8 +158,8 @@ std::string http_get(int port, const char * path, int timeout_s) {
         }
     }
     close(fd);
-    const size_t body = out.find("\r\n\r\n");
-    return body == std::string::npos ? std::string() : out.substr(body + 4);
+    const size_t at = out.find("\r\n\r\n");
+    return at == std::string::npos ? std::string() : out.substr(at + 4);
 }
 
 double metric(const std::string & text, const char * name) {
@@ -327,6 +332,9 @@ void StatsCollector::run() {
     double last_busy = 0, last_tokens = 0, last_gen_s = 0;
     bool   have_last = false, last_working = false;
     double last_ptok = 0, last_psec = 0, last_decoded = 0;
+    // The hour charts' sums since their last point: temperature, power, GPU, CPU.
+    double hour_sum[4] = {};
+    int    hour_n[4] = {}, seconds = 0;
     for (;;) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
         const double wall = now_s(), cpu = cpu_seconds();
@@ -485,6 +493,23 @@ void StatsCollector::run() {
         }
         push(live_.gpu_history, live_.gpu_busy);
         push(live_.gen_history, live_.gen_tps);
+        const float now[4] = { soc_t, watts, live_.gpu_busy, live_.cpu_use };
+        const bool  read[4] = { soc_t > -100, watts > 0, true, true };
+        std::vector<float> * hour[4] = { &live_.temp_hour, &live_.power_hour, &live_.gpu_hour, &live_.cpu_hour };
+        ++seconds;
+        for (int i = 0; i < 4; ++i) {
+            if (read[i]) {
+                hour_sum[i] += now[i];
+                ++hour_n[i];
+            }
+            if (seconds % 30 == 0) {
+                if (hour_n[i] > 0) {
+                    push(*hour[i], (float) (hour_sum[i] / hour_n[i]));
+                }
+                hour_sum[i] = 0;
+                hour_n[i] = 0;
+            }
+        }
         last_wall = wall;
         last_cpu  = cpu;
     }

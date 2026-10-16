@@ -1,9 +1,10 @@
-// PS5LM's screen on the TV, four pages along a dock, switched with L1/R1:
+// PS5LM's screen on the TV, five pages along a dock, switched with L1/R1:
 //   - Home: the loaded model and how fast it runs, and where the network
 //     reaches it.
 //   - Models: the models on this console, the ones suggested for it, a
 //     Hugging Face search, and the downloads.
 //   - API: the endpoints the loaded model answers, and how to call them.
+//   - Console: temperature, power and load over the last minutes or hour.
 //   - Settings: categories of rows, with the logs under Diagnostics.
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
@@ -17,6 +18,7 @@
 #include "core/tween.hpp"
 #include "gfx/backdrop_spec.hpp"
 #include "gfx/draw_list.hpp"
+#include "ui/components/input_prompt.hpp"
 #include "ui/feedback.hpp"
 #include "ui/fonts.hpp"
 #include "ui/motion.hpp"
@@ -36,13 +38,13 @@ struct DashboardFrame {
 
 class Dashboard {
   public:
-    static constexpr int kPages = 4;
-    static constexpr int kHomePage = 0, kModelsPage = 1, kApiPage = 2, kSettingsPage = 3;
+    static constexpr int kPages = 5;
+    static constexpr int kHomePage = 0, kModelsPage = 1, kApiPage = 2, kConsolePage = 3, kSettingsPage = 4;
     // The Models page's sections.
     static constexpr int kSections = 4;
     static constexpr int kLocal = 0, kSuggested = 1, kSearch = 2, kDownloads = 3;
 
-    explicit Dashboard(const hui::ui::Fonts & fonts) : fonts_(fonts) {}
+    explicit Dashboard(const hui::ui::Fonts & fonts);
 
     void set_live(const Live & live) { live_ = live; }
     // Slow work in progress: a spinner and these lines over everything, and
@@ -67,8 +69,8 @@ class Dashboard {
     // changed (read them with settings()).
     struct Request {
         enum Kind { none, load, unload, settings, clear_scratch, market_search, market_open, market_plan, market_download,
-                    market_download_unload, download_pause, download_resume, download_remove, suggested_download } kind = none;
-        std::string path;   // a model, a market query, or the folder a download goes to (empty: the setting)
+                    market_download_unload, download_pause, download_resume, download_remove, suggested_download, ask } kind = none;
+        std::string path;   // a model, a market query, the folder a download goes to (empty: the setting), or what to ask
         int repo = -1, file = -1;  // a market file, a download's index (repo), or a suggestion's (repo)
     };
     Request take_request() {
@@ -86,6 +88,7 @@ class Dashboard {
     void update_market(const hui::InputFrame & input, hui::ui::Feedback & feedback);
     void update_downloads(const hui::InputFrame & input, hui::ui::Feedback & feedback);
     void update_settings(const hui::InputFrame & input, hui::ui::Feedback & feedback);
+    void update_picker(const hui::InputFrame & input, hui::ui::Feedback & feedback);
     void update_logs(const hui::InputFrame & input, hui::ui::Feedback & feedback);
     void start_download(hui::ui::Feedback & feedback);
     void refilter_logs();
@@ -100,7 +103,9 @@ class Dashboard {
     void draw_market(hui::gfx::DrawList & list, const hui::gfx::Rect & area) const;
     void draw_downloads(hui::gfx::DrawList & list, const hui::gfx::Rect & area) const;
     void draw_api(hui::gfx::DrawList & list) const;
+    void draw_console(hui::gfx::DrawList & list) const;
     void draw_settings(hui::gfx::DrawList & list) const;
+    void draw_picker(hui::gfx::DrawList & list) const;
     void draw_logs(hui::gfx::DrawList & list, const hui::gfx::Rect & area) const;
     void draw_dialogs(hui::gfx::DrawList & list) const;
     void draw_busy(hui::gfx::DrawList & list) const;
@@ -113,6 +118,10 @@ class Dashboard {
     float age_   = 0;  // seconds since start
     float clock_ = 0;  // idle motion
     std::string busy_title_, busy_text_;
+    hui::ui::InputPrompt prompt_;          // a message typed on Home
+    int   demo_ = 0;                       // the next demo to send
+    bool  was_serving_ = false;              // for the sound when a model becomes ready
+    std::vector<std::string> unfinished_;    // downloads not saved yet, for the sound when one is
 
     int   page_ = 0;
     int   page_from_ = 0;
@@ -142,6 +151,11 @@ class Dashboard {
     int   setting_category_ = 0;
     int   setting_row_ = 0;
     bool  in_rows_ = false;         // the focus is on the rows, not the categories
+    bool  picker_ = false;          // a row's choices are open in a list under it
+    int   picker_cursor_ = 0;
+
+    // Console.
+    bool  console_hour_ = false;    // the charts show the last hour, not the last two minutes
 
     // Diagnostics.
     std::vector<std::string> app_log_, llama_log_;    // as read

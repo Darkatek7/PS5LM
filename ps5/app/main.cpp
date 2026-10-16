@@ -599,6 +599,33 @@ int main(int, char **) {
     fonts.hand = fonts.regular;
     std::printf("ps5lm-app: dashboard %s\n", ui_ok ? "ready" : "failed");
 
+    Dashboard dash(fonts);
+    DashboardFrame frame;
+    const auto render = [&] {
+        frame.backdrop = {};
+        frame.scene.clear();
+        frame.overlay.clear();
+        frame.glass = false;
+        frame.glass_texture = renderer.glass_texture();
+        dash.draw(frame);
+        renderer.begin();
+        renderer.backdrop(frame.backdrop);
+        renderer.draw(frame.scene);
+        if (frame.glass) {
+            renderer.glass();
+        }
+        renderer.draw(frame.overlay);
+        display.present(renderer);
+    };
+    // The splash before the slow part (the GPU opening, every model's header
+    // read), so a restart for a model is never a black screen.
+    if (ui_ok) {
+        dash.set_busy("Starting", "Opening the GPU and reading the models");
+        render();
+        display.swap();
+    }
+    sceSystemServiceHideSplashScreen();
+
     Models models;
     for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
@@ -682,12 +709,11 @@ int main(int, char **) {
     hui::audio::SoundBank sounds;
     sounds.load(std::string(kAssets) + "/audio/sfx");
 
-    Dashboard dash(fonts);
+    dash.set_busy("");
     Market    market;
     market.start(models.budget_gib);
     int  saved_seen = 0;  // downloads finished, as last seen
     dash.set_settings(models.settings);
-    bool      library_shown = false;  // opened once at launch when no model is loaded
     bool      scratch_warned = false;
     // Downloads left queued or running carry on, on their own page.
     unlink("/data/PS5LM/download.txt");  // the queue file replaced this one (v0.7.0)
@@ -696,11 +722,9 @@ int main(int, char **) {
         // Running already, maybe: the queue's thread starts it at once.
         if (d.state == DownloadState::queued || d.state == DownloadState::running) {
             dash.show_downloads();
-            library_shown = true;  // stay on Downloads, not the library
             break;
         }
     }
-    DashboardFrame frame;
     hui::ui::Feedback feedback;
     hui::PadSample samples[64];
     int64_t last = hui::sys::monotonic_us();
@@ -738,12 +762,6 @@ int main(int, char **) {
             models.publish(stats);
         }
         dash.set_live(live);
-        if (!library_shown && !live.models.empty()) {
-            library_shown = true;
-            if (live.state == ServerState::no_model) {
-                dash.open_library();
-            }
-        }
         feedback.clear();
         // A button pressed from the PC (scripts/ps5lm-app.sh press r1), for
         // testing the screens without a controller in hand.
@@ -849,6 +867,7 @@ int main(int, char **) {
             std::printf("ps5lm-app: settings saved\n");
         }
         switch (req.kind) {
+            case Dashboard::Request::ask: ask_self(kPort, req.path, !live.decision.empty()); break;
             case Dashboard::Request::market_search: market.search(req.path); break;
             case Dashboard::Request::market_open: market.open_repo(req.repo); break;
             case Dashboard::Request::market_plan: market.plan_file(req.repo, req.file); break;
@@ -934,29 +953,13 @@ int main(int, char **) {
         }
 
         if (ui_ok) {
-            frame.backdrop = {};
-            frame.scene.clear();
-            frame.overlay.clear();
-            frame.glass = false;
-            frame.glass_texture = renderer.glass_texture();
-            dash.draw(frame);
-            renderer.begin();
-            renderer.backdrop(frame.backdrop);
-            renderer.draw(frame.scene);
-            if (frame.glass) {
-                renderer.glass();
-            }
-            renderer.draw(frame.overlay);
-            display.present(renderer);
+            render();
             if (n % 60 == 45 && !take_request_file("/data/PS5LM/screenshot").empty()) {
                 const bool ok = save_screen("/data/PS5LM/screen.bmp", display.width(), display.height());
                 std::printf("ps5lm-app: screenshot %s\n", ok ? "saved" : "failed");
             }
         }
         display.swap();
-        if (n == 0) {
-            sceSystemServiceHideSplashScreen();  // the first picture is up
-        }
         if (n % 60 == 0) {
             quit_if_asked();
         }

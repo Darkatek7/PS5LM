@@ -33,8 +33,10 @@ no PC while it runs, no cloud and no account.
   <img src="docs/media/app/home.jpg" width="49%" alt="Home: the model, its speed and the live requests">
   <img src="docs/media/app/models.jpg" width="49%" alt="Models: the ones suggested for the PS5">
   <img src="docs/media/app/home-decision.jpg" width="49%" alt="Home with a decision model">
+  <img src="docs/media/app/console.jpg" width="49%" alt="Console: temperature, power and load over time">
   <img src="docs/media/app/api.jpg" width="49%" alt="API: the endpoints and an example">
-  <br><sub>Home, Models and API on the TV.</sub>
+  <img src="docs/media/app/settings.jpg" width="49%" alt="Settings: a list of choices under the row">
+  <br><sub>Home, Models, Console, API and Settings on the TV.</sub>
 </p>
 
 ## A model server under your TV
@@ -47,8 +49,11 @@ no PC while it runs, no cloud and no account.
   any model name: the loaded one answers.
 - **It decides, too.** Load a decision model and the console answers TypeSafe's `/v1/systemone`:
   choice, score and yes-or-no questions about text and images, the API Ollaya serves on a PC.
-- **It shows its work.** Every request streams across the TV as it is answered: which device asked,
-  what it asked, and the reply as it is written.
+- **It shows its work.** Every request streams across the TV as a chat: which device asked, what it
+  asked, and the reply as it is written. Square sends a demo and Triangle opens a keyboard, so the
+  console can be tried from the couch.
+- **It watches the console.** A Console page charts temperature, power, GPU and CPU load over the
+  last two minutes or the last hour, beside a table of every reading.
 - **It picks what fits.** The planner reads each GGUF and gives it the longest context and best cache
   that fit the memory free. A Suggested list holds models measured on the console, and the app
   downloads from Hugging Face by itself, to internal storage, the M.2 drive or a USB drive.
@@ -108,12 +113,14 @@ To update, copy the new folder over the old one. Settings, models and downloads 
 
 | Where | Button | Does |
 |---|---|---|
-| Everywhere | L1 / R1 | Home, Models, API, Settings |
-| Home | Cross / Triangle | change the model / the API page |
+| Everywhere | L1 / R1 | Home, Models, API, Console, Settings |
+| Home | Cross | change the model |
+| Home | Square / Triangle | send a demo request / type a message |
 | Models | D-pad, Cross | choose a section and a model; load, unload or download it |
 | Models, Search | L2 / R2, Square | change the search; check whether a file fits |
 | Models, Downloads | Cross, Square | pause or resume; cancel (press twice) or clear |
-| Settings | D-pad, Cross | choose a category and a row; change it |
+| Console | L2 / R2 | the last two minutes / the last hour |
+| Settings | D-pad, Cross | choose a category and a row; flip it, or pick from its list |
 | Settings, Diagnostics | Square, Triangle | app or server log; errors only |
 
 ## Want to tinker?

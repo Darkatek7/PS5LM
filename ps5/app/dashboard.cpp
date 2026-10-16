@@ -6,6 +6,21 @@
 // the console's temperature and power sit in the status line, where a car
 // shows the weather. Colour means state only: blue is what is active or
 // chosen, green a model that serves, red a fault. Everything else is grey.
+//
+// Sound works the same way: one sound for each kind of thing, on every page,
+// always at the same pitch, so the ear learns them (PocketVibe's set, in
+// assets/audio/sfx, named after the cue):
+//   focus        the highlight moved
+//   error        it cannot: the end of a list, a model too big
+//   tab          another page, or another view of one (search, log, range)
+//   select       went in, or did it: a section, a choice, a download, a pause
+//   back         came out, or cancelled
+//   modal_open   a question or a list of choices opened
+//   modal_close  ... and closed without an answer
+//   toggle       a switch flipped
+//   launch       a model starts loading
+//   notify       a model is ready (not from a button)
+//   complete     a download is saved (not from a button)
 #include "dashboard.hpp"
 #include "suggested.hpp"
 #include "version.hpp"
@@ -54,7 +69,7 @@ constexpr int   kVisibleRows = 7;
 constexpr float kTau = 6.2831853f;
 constexpr const char * kDash = "\xE2\x80\x94";
 
-constexpr const char * kPageNames[Dashboard::kPages] = { "Home", "Models", "API", "Settings" };
+constexpr const char * kPageNames[Dashboard::kPages] = { "Home", "Models", "API", "Console", "Settings" };
 constexpr const char * kSectionNames[Dashboard::kSections] = { "On this PS5", "Suggested", "Search", "Downloads" };
 
 // The market's searches, switched with L2/R2: Hugging Face's most downloaded
@@ -187,29 +202,33 @@ void meter(gfx::DrawList & l, float x, float y, float w, float share, Color c) {
 
 // The model's speed over the last two minutes as one line, newest on the
 // right, on a faint floor; Tesla's energy graph, not a dashboard chart.
-void trace(gfx::DrawList & l, const std::vector<float> & v, const Rect & g, Color c) {
-    l.line(g.x, g.y + g.h, g.x + g.w, g.y + g.h, 1.5f, kHair);
-    if (v.size() < 2) {
+// A series of up to 120 points between lo and hi, newest at the right edge.
+void plot(gfx::DrawList & l, const std::vector<float> & v, const Rect & g, Color c, float lo, float hi) {
+    if (v.size() < 2 || hi <= lo) {
         return;
     }
-    float top = 1.0f;
-    for (float x : v) {
-        top = std::max(top, x);
-    }
-    top *= 1.15f;
     const float step = g.w / 119.0f;
+    const auto at = [&](float x) { return g.y + g.h - tween::clamp01((x - lo) / (hi - lo)) * g.h; };
     float lx = 0, ly = 0;
     for (size_t age = 0; age < v.size(); ++age) {
         const float x = g.x + g.w - (float) age * step;
-        const float y = g.y + g.h - v[v.size() - 1 - age] / top * g.h;
+        const float y = at(v[v.size() - 1 - age]);
         if (age > 0) {
             l.line(lx, ly, x, y, 2.0f, c);
         }
         lx = x;
         ly = y;
     }
-    const float y = g.y + g.h - v.back() / top * g.h;
-    l.circle(g.x + g.w, y, 5, c);
+    l.circle(g.x + g.w, at(v.back()), 5, c);
+}
+
+void trace(gfx::DrawList & l, const std::vector<float> & v, const Rect & g, Color c) {
+    l.line(g.x, g.y + g.h, g.x + g.w, g.y + g.h, 1.5f, kHair);
+    float top = 1.0f;
+    for (float x : v) {
+        top = std::max(top, x);
+    }
+    plot(l, v, g, c, 0, top * 1.15f);
 }
 
 // The dock's line icons, 32 px, drawn with strokes like the rest.
@@ -246,6 +265,15 @@ void icon(gfx::DrawList & l, int page, float cx, float cy, Color c) {
             l.line(cx + 16, cy, cx + 7, cy + 10, w, c);
             l.line(cx + 3, cy - 13, cx - 3, cy + 13, w, c);
             break;
+        case Dashboard::kConsolePage: {
+            // A pulse: the line a monitor draws.
+            const float px[] = { cx - 17, cx - 8, cx - 3, cx + 3, cx + 8, cx + 17 };
+            const float py[] = { cy + 2, cy + 2, cy - 12, cy + 13, cy, cy };
+            for (int i = 0; i < 5; ++i) {
+                l.line(px[i], py[i], px[i + 1], py[i + 1], w, c);
+            }
+            break;
+        }
         default: {
             const float knobs[] = { -6, 7, -1 };
             for (int i = 0; i < 3; ++i) {
@@ -267,7 +295,9 @@ void toggle_switch(gfx::DrawList & l, float right, float cy, bool on) {
 }
 
 // Greedy word wrap to `width`; a word longer than a line is cut.
-std::vector<std::string> wrap(const ui::FontRef & f, const std::string & text, float size, float width) {
+std::vector<std::string> wrap(const ui::FontRef & f, const std::string & raw, float size, float width) {
+    std::string text = raw;  // line breaks and tabs have no glyph: spaces
+    std::replace_if(text.begin(), text.end(), [](char c) { return c == '\n' || c == '\r' || c == '\t'; }, ' ');
     std::vector<std::string> lines;
     std::string line;
     size_t at = 0;
@@ -380,85 +410,120 @@ bool toggle_value(const Settings & s, Setting id) {
     return id == Setting::auto_load ? s.auto_load : id == Setting::sounds ? s.sounds : s.tools;
 }
 
-template <typename T, size_t N> bool step_in(const T (&steps)[N], T & value, int dir, int fallback) {
-    int at = fallback;
-    for (int i = 0; i < (int) N; ++i) {
-        if (steps[i] == value) {
-            at = i;
-        }
-    }
-    if (at + dir < 0 || at + dir >= (int) N) {
-        return false;
-    }
-    value = steps[at + dir];
-    return true;
-}
+// A row's choices, for the list X opens under it: each with the settings it
+// would make, and whether it is the one set now.
+struct Choice {
+    std::string label, note;
+    Settings    value;
+    bool        current = false;
+};
 
-// Moves a stepper one place; false at either end.
-bool step_setting(Settings & s, Setting id, int dir, const std::vector<ModelRow> & models, const std::vector<Drive> & drives) {
+std::vector<Choice> choices_of(const Settings & s, Setting id, const std::vector<ModelRow> & models,
+                               const std::vector<Drive> & drives) {
+    std::vector<Choice> out;
+    const auto add = [&](std::string label, std::string note, bool current, auto set) {
+        Choice c{ std::move(label), std::move(note), s, current };
+        set(c.value);
+        out.push_back(std::move(c));
+    };
     switch (id) {
-        case Setting::default_model: {
-            // "None", then each model that fits, in the list's order.
-            std::vector<std::string> choices = { "" };
+        case Setting::default_model:
+            add("None", "Wait for a choice", s.default_model.empty(), [](Settings & v) { v.default_model.clear(); });
             for (const auto & m : models) {
                 if (m.fits) {
-                    choices.push_back(m.file);
+                    std::string name, build;
+                    split_name(m.label, &name, &build);
+                    add(name + "  " + build, gb(m.size_gib), m.file == s.default_model,
+                        [&](Settings & v) { v.default_model = m.file; });
                 }
             }
-            int at = 0;
-            for (int i = 0; i < (int) choices.size(); ++i) {
-                if (choices[(size_t) i] == s.default_model) {
-                    at = i;
-                }
+            break;
+        case Setting::ctx_cap:
+            for (uint32_t c : kCtxSteps) {
+                add(format("%.0fk tokens", c / 1024.0), "", s.ctx_cap == c, [c](Settings & v) { v.ctx_cap = c; });
             }
-            if (at + dir < 0 || at + dir >= (int) choices.size()) {
-                return false;
-            }
-            s.default_model = choices[(size_t) (at + dir)];
-            return true;
-        }
-        case Setting::ctx_cap: return step_in(kCtxSteps, s.ctx_cap, dir, 4);
+            break;
         case Setting::kv_type: {
-            int at = 0;
+            const char * notes[] = { "The best that fits", "Full quality, the most memory", "Near full quality, half the memory",
+                                     "A quarter of the memory" };
             for (int i = 0; i < 4; ++i) {
-                if (s.kv_type == kKvSteps[i]) {
-                    at = i;
-                }
+                const std::string t = kKvSteps[i];
+                add(i == 0 ? "Auto" : t, notes[i], s.kv_type == t, [&](Settings & v) { v.kv_type = t; });
             }
-            if (at + dir < 0 || at + dir >= 4) {
-                return false;
-            }
-            s.kv_type = kKvSteps[at + dir];
-            return true;
+            break;
         }
-        case Setting::scratch_limit: return step_in(kScratchSteps, s.scratch_limit_gib, dir, 1);
-        case Setting::auto_load: s.auto_load = !s.auto_load; return true;
-        case Setting::sounds: s.sounds = !s.sounds; return true;
-        case Setting::tools: s.tools = !s.tools; return true;
-        case Setting::clear_scratch: return false;
-        case Setting::download_dir: {
-            int at = -1;  // a missing drive counts as before the first
-            for (int i = 0; i < (int) drives.size(); ++i) {
-                if (drives[(size_t) i].models == s.download_dir) {
-                    at = i;
-                }
+        case Setting::scratch_limit:
+            for (uint32_t g : kScratchSteps) {
+                add(format("%.0f GB", (double) g), "", s.scratch_limit_gib == g, [g](Settings & v) { v.scratch_limit_gib = g; });
             }
-            if (at + dir < 0 || at + dir >= (int) drives.size()) {
-                return false;
+            break;
+        case Setting::download_dir:
+            for (const auto & d : drives) {
+                add(d.name, d.total > 0 ? gb(d.free) + " free" : "", d.models == s.download_dir,
+                    [&](Settings & v) { v.download_dir = d.models; });
             }
-            s.download_dir = drives[(size_t) (at + dir)].models;
-            return true;
-        }
+            break;
+        default: break;
     }
-    return false;
+    return out;
 }
 
 // The base name a suggestion's model file has on the console.
 const char * local_name(const SuggestedFile & f) { return f.save_as ? f.save_as : f.file; }
 
+// What Square sends from Home, in turn: something to show the model off with.
+constexpr const char * kChatDemos[] = {
+    "In two sentences, how can a PS5 run a language model?",
+    "Write a haiku about a game console that dreams in tokens.",
+    "Give me three names for a home AI server that lives under the TV.",
+    "What is 17 times 23? Show the steps in one line.",
+};
+constexpr const char * kDecisionDemos[] = {
+    "I was charged twice this month. Refund me or I cancel.",
+    "Love the new update, everything is so much faster now!",
+    "Where can I find the invoice for last month?",
+    "Third time asking. Cancel my subscription today.",
+};
+constexpr int kDemos = 4;
+
 }  // namespace
 
 // ---- state ------------------------------------------------------------------------
+
+Dashboard::Dashboard(const ui::Fonts & fonts) : fonts_(fonts) {
+    // The message prompt in the dashboard's own colours, with Turkish letters
+    // over the space bar.
+    ui::Theme & t = prompt_.style.theme;
+    t.page = kBase;
+    t.surface = kSurface;
+    t.surface_high = kRaised;
+    t.text = t.page_text = kInk;
+    t.text_muted = t.page_text_muted = kInk2;
+    t.primary = t.accent = kBlue;
+    t.on_primary = t.on_secondary = kInk;
+    t.secondary = kRaised;
+    t.outline = kHair;
+    t.focus = kBlue;
+    t.heading = ui::FontRole::semibold;
+    t.radius = 14;
+    t.radius_card = 24;
+    prompt_.style.frosted = false;
+    prompt_.style.width = 1100;
+    prompt_.style.max_length = 400;
+    prompt_.keyboard.style.bindings = ui::KeyboardBindings::standard();
+    prompt_.keyboard.style.pitch_by_column = false;
+    prompt_.keyboard.style.erase = Cue::type;
+    ui::KeyboardLayout letters = ui::KeyboardLayout::letters();
+    const char * tr[][2] = { { "\xC3\xA7", "\xC3\x87" }, { "\xC4\x9F", "\xC4\x9E" }, { "\xC4\xB1", "I" },
+                             { "\xC4\xB0", "\xC4\xB0" }, { "\xC3\xB6", "\xC3\x96" }, { "\xC5\x9F", "\xC5\x9E" },
+                             { "\xC3\xBC", "\xC3\x9C" } };
+    std::vector<ui::KeyboardKey> row;
+    for (const auto & k : tr) {
+        row.push_back({ ui::KeyKind::character, k[0], k[1] });
+    }
+    letters.rows.insert(letters.rows.end() - 1, row);
+    prompt_.keyboard.set_layouts({ letters, ui::KeyboardLayout::symbols() });
+}
 
 void Dashboard::open_library() {
     page_from_ = page_;
@@ -487,7 +552,7 @@ void Dashboard::go_to(int page, ui::Feedback * feedback) {
     page_ = page;
     page_age_ = 0;
     if (feedback) {
-        feedback->play(Cue::tab, 1.0f + 0.04f * (float) page);
+        feedback->play(Cue::tab);
     }
 }
 
@@ -510,28 +575,59 @@ void Dashboard::refilter_logs() {
 
 void Dashboard::update(const hui::InputFrame & raw, float dt, ui::Feedback & feedback) {
     const hui::InputFrame none{};
-    const bool dialog = market_confirm_ || market_space_;
+    const bool dialog = market_confirm_ || market_space_ || picker_;
     const hui::InputFrame & input = busy() ? none : raw;  // busy: the screen says so, buttons wait
     age_ += dt;
     clock_ += dt;
     page_age_ += dt;
 
-    // L1/R1 walk the dock, unless a question is open.
+    // Two sounds come from events, not buttons: a model ready, a download saved.
+    const bool serving = live_.state == ServerState::ready || live_.state == ServerState::generating;
+    if (serving && !was_serving_) {
+        feedback.play(Cue::notify);
+    }
+    was_serving_ = serving;
+    std::vector<std::string> unfinished;
+    for (const auto & d : market_.downloads) {
+        if (d.state != DownloadState::done) {
+            unfinished.push_back(d.file);
+        } else if (std::find(unfinished_.begin(), unfinished_.end(), d.file) != unfinished_.end()) {
+            feedback.play(Cue::complete);
+        }
+    }
+    unfinished_ = std::move(unfinished);
+
+    // L1/R1 walk the dock, unless a question is open. A message being typed
+    // takes every button until it is sent or dropped.
     const int step = input.is_pressed(Action::page_next) ? 1 : input.is_pressed(Action::page_prev) ? -1 : 0;
-    if (step != 0 && !dialog) {
+    if (prompt_.is_open()) {
+        if (prompt_.handle(input, feedback) == ui::Event::activated) {
+            request_ = { Request::ask, prompt_.text() };
+        }
+    } else if (step != 0 && !dialog) {
         const int next = page_ + step;
         if (next >= 0 && next < kPages) {
             go_to(next, &feedback);
         } else {
-            feedback.play(Cue::error, 1.0f, 0.0f, 0.6f);
+            feedback.play(Cue::error);
         }
     } else if (page_ == kHomePage) {
         update_home(input, feedback);
     } else if (page_ == kModelsPage) {
         update_models(input, feedback);
+    } else if (page_ == kConsolePage) {
+        // L2 the last two minutes, R2 the last hour.
+        const int to = input.is_pressed(Action::jump_next) ? 1 : input.is_pressed(Action::jump_prev) ? 0 : -1;
+        if (to >= 0 && (to == 1) != console_hour_) {
+            console_hour_ = to == 1;
+            feedback.play(Cue::tab);
+        } else if (to >= 0) {
+            feedback.play(Cue::error);
+        }
     } else if (page_ == kSettingsPage) {
         update_settings(input, feedback);
     }
+    prompt_.update(dt);
 
     // Where the highlight goes: a section or a row on Models, a category or a
     // row on Settings.
@@ -564,11 +660,20 @@ void Dashboard::update(const hui::InputFrame & raw, float dt, ui::Feedback & fee
 }
 
 void Dashboard::update_home(const hui::InputFrame & input, ui::Feedback & feedback) {
+    const bool decision = !live_.decision.empty();
+    const bool serving = live_.state == ServerState::ready || live_.state == ServerState::generating;
     if (input.is_pressed(Action::confirm)) {
         open_library();
-        feedback.play(Cue::open);
+        feedback.play(Cue::select);
+    } else if ((input.is_pressed(Action::west) || input.is_pressed(Action::north)) && !serving) {
+        feedback.play(Cue::error);  // nothing answers yet
+    } else if (input.is_pressed(Action::west)) {
+        request_ = { Request::ask, (decision ? kDecisionDemos : kChatDemos)[demo_++ % kDemos] };
+        feedback.play(Cue::select);
     } else if (input.is_pressed(Action::north)) {
-        go_to(kApiPage, &feedback);
+        prompt_.set_title(decision ? "Text to decide on" : "Message");
+        prompt_.field.set_placeholder(decision ? "A customer message, a review, a ticket" : "Ask anything");
+        prompt_.open(feedback);
     }
 }
 
@@ -582,13 +687,13 @@ void Dashboard::update_models(const hui::InputFrame & input, ui::Feedback & feed
             const int next = section_ + (input.nav == Direction::down ? 1 : -1);
             if (next >= 0 && next < kSections) {
                 section_ = next;
-                feedback.play(Cue::focus, 1.0f + 0.04f * (float) next);
+                feedback.play(Cue::focus);
                 if (section_ == kSearch && !market_searched_) {
                     market_searched_ = true;
                     request_ = { Request::market_search, "" };
                 }
             } else if (!input.nav_repeat) {
-                feedback.play(Cue::error, 1.0f, 0.0f, 0.6f);
+                feedback.play(Cue::error);
             }
         }
         if (input.nav == Direction::right || input.is_pressed(Action::confirm)) {
@@ -623,11 +728,11 @@ bool walk(const hui::InputFrame & input, int & cursor, int count, ui::Feedback &
     const int next = cursor + (input.nav == Direction::down ? 1 : -1);
     if (next >= 0 && next < count) {
         cursor = next;
-        feedback.play(Cue::focus, 1.0f + 0.015f * (float) std::min(next, 12));
+        feedback.play(Cue::focus);
         return true;
     }
     if (!input.nav_repeat) {
-        feedback.play(Cue::error, 1.0f, 0.0f, 0.6f);
+        feedback.play(Cue::error);
     }
     return false;
 }
@@ -642,7 +747,7 @@ void Dashboard::update_local(const hui::InputFrame & input, ui::Feedback & feedb
         const ModelRow & m = live_.models[(size_t) local_cursor_];
         if (m.current) {
             request_ = { Request::unload, m.file };
-            feedback.play(Cue::back);
+            feedback.play(Cue::select);
         } else if (m.fits) {
             request_ = { Request::load, m.file };
             feedback.play(Cue::launch);
@@ -661,10 +766,10 @@ void Dashboard::update_suggested(const hui::InputFrame & input, ui::Feedback & f
             here = here || m.label + ".gguf" == local_name(s.model);
         }
         if (here) {
-            feedback.play(Cue::error, 1.0f, 0.0f, 0.6f);
+            feedback.play(Cue::error);
         } else {
             request_ = { Request::suggested_download, settings_.download_dir, suggested_cursor_ };
-            feedback.play(Cue::complete);
+            feedback.play(Cue::select);
         }
     }
 }
@@ -676,7 +781,7 @@ void Dashboard::start_download(ui::Feedback & feedback) {
         feedback.play(Cue::modal_open);
     } else {
         request_ = { Request::market_download, market_dir_, market_.open, market_file_ };
-        feedback.play(Cue::complete);
+        feedback.play(Cue::select);
     }
 }
 
@@ -697,11 +802,11 @@ void Dashboard::update_market(const hui::InputFrame & input, ui::Feedback & feed
         if (input.is_pressed(Action::north)) {
             request_ = { Request::market_download_unload, market_dir_, market_.open, market_file_ };
             market_confirm_ = false;
-            feedback.play(Cue::complete);
+            feedback.play(Cue::select);
         } else if (input.is_pressed(Action::confirm)) {
             request_ = { Request::market_download, market_dir_, market_.open, market_file_ };
             market_confirm_ = false;
-            feedback.play(Cue::complete);
+            feedback.play(Cue::select);
         } else if (input.is_pressed(Action::back)) {
             market_confirm_ = false;
             feedback.play(Cue::modal_close);
@@ -718,7 +823,7 @@ void Dashboard::update_market(const hui::InputFrame & input, ui::Feedback & feed
             request_ = { Request::market_search, next == 0 ? std::string() : std::string(kMarketChips[next]) };
             feedback.play(Cue::tab);
         } else {
-            feedback.play(Cue::error, 1.0f, 0.0f, 0.6f);
+            feedback.play(Cue::error);
         }
         return;
     }
@@ -734,7 +839,7 @@ void Dashboard::update_market(const hui::InputFrame & input, ui::Feedback & feed
             request_ = { Request::market_open, "", cursor, -1 };
             market_files_ = true;
             market_file_ = 0;
-            feedback.play(Cue::open);
+            feedback.play(Cue::select);
         } else if (market_files_ && open && cursor < files) {
             const MarketFile & f = open->files[(size_t) cursor];
             const double need = f.bytes / 1073741824.0 + 1.0;  // and 1 GiB spare, as Market::download wants
@@ -766,7 +871,7 @@ void Dashboard::update_market(const hui::InputFrame & input, ui::Feedback & feed
             request_ = { Request::market_plan, "", market_.open, cursor };
             feedback.play(Cue::select);
         } else {
-            feedback.play(Cue::error, 1.0f, 0.0f, 0.6f);  // checked already
+            feedback.play(Cue::error);  // checked already
         }
     }
     if (input.is_pressed(Action::back) && market_files_) {
@@ -796,9 +901,9 @@ void Dashboard::update_downloads(const hui::InputFrame & input, ui::Feedback & f
             feedback.play(Cue::select);
         } else if (d.state == DownloadState::paused || d.state == DownloadState::failed) {
             request_ = { Request::download_resume, "", dl_cursor_ };
-            feedback.play(Cue::complete);
+            feedback.play(Cue::select);
         } else {
-            feedback.play(Cue::error, 1.0f, 0.0f, 0.6f);
+            feedback.play(Cue::error);
         }
     }
     // Square: a finished one leaves the list; any other is cancelled and its
@@ -807,7 +912,7 @@ void Dashboard::update_downloads(const hui::InputFrame & input, ui::Feedback & f
         if (d.state == DownloadState::done || dl_confirm_ == dl_cursor_) {
             request_ = { Request::download_remove, "", dl_cursor_ };
             dl_confirm_ = -1;
-            feedback.play(Cue::back);
+            feedback.play(Cue::select);
         } else {
             dl_confirm_ = dl_cursor_;
             feedback.play(Cue::modal_open);
@@ -816,6 +921,10 @@ void Dashboard::update_downloads(const hui::InputFrame & input, ui::Feedback & f
 }
 
 void Dashboard::update_settings(const hui::InputFrame & input, ui::Feedback & feedback) {
+    if (picker_) {
+        update_picker(input, feedback);
+        return;
+    }
     if (!in_rows_) {
         if (input.nav == Direction::up || input.nav == Direction::down) {
             const int next = setting_category_ + (input.nav == Direction::down ? 1 : -1);
@@ -823,9 +932,9 @@ void Dashboard::update_settings(const hui::InputFrame & input, ui::Feedback & fe
                 setting_category_ = next;
                 setting_row_ = 0;
                 log_scroll_ = 0;
-                feedback.play(Cue::focus, 1.0f + 0.04f * (float) next);
+                feedback.play(Cue::focus);
             } else if (!input.nav_repeat) {
-                feedback.play(Cue::error, 1.0f, 0.0f, 0.6f);
+                feedback.play(Cue::error);
             }
         }
         if (input.nav == Direction::right || input.is_pressed(Action::confirm)) {
@@ -846,28 +955,41 @@ void Dashboard::update_settings(const hui::InputFrame & input, ui::Feedback & fe
     const SettingCategory & c = kCategories[setting_category_];
     walk(input, setting_row_, c.count, feedback);
     const Setting id = c.rows[setting_row_].id;
-    if (id == Setting::clear_scratch) {
-        if (input.is_pressed(Action::confirm)) {
-            request_ = { Request::clear_scratch, "" };
-            feedback.play(Cue::saved);
-        }
+    if (!input.is_pressed(Action::confirm)) {
         return;
     }
-    int dir = input.nav == Direction::right ? 1 : 0;
-    if (is_toggle(id) && input.is_pressed(Action::confirm)) {
-        dir = 1;
-    }
-    if (dir == 0 && input.is_pressed(Action::west)) {
-        dir = -1;  // Square steps back, as left once did
-    }
-    if (is_toggle(id) && input.nav == Direction::right && toggle_value(settings_, id)) {
-        dir = 0;  // right turns a switch on; it is on
-    }
-    if (dir != 0 && step_setting(settings_, id, dir, live_.models, live_.drives)) {
+    // Cross does what the row is: clears, flips a switch, or opens its choices.
+    if (id == Setting::clear_scratch) {
+        request_ = { Request::clear_scratch, "" };
+        feedback.play(Cue::select);
+    } else if (is_toggle(id)) {
+        bool & on = id == Setting::auto_load ? settings_.auto_load : id == Setting::sounds ? settings_.sounds : settings_.tools;
+        on = !on;
         request_ = { Request::settings, "" };
-        feedback.play(is_toggle(id) ? Cue::toggle : Cue::slider, 1.0f + 0.05f * (float) dir);
-    } else if (dir != 0 && !input.nav_repeat) {
-        feedback.play(Cue::error, 1.0f, 0.0f, 0.6f);
+        feedback.play(Cue::toggle);
+    } else {
+        const auto all = choices_of(settings_, id, live_.models, live_.drives);
+        picker_ = true;
+        picker_cursor_ = 0;
+        for (int i = 0; i < (int) all.size(); ++i) {
+            picker_cursor_ = all[(size_t) i].current ? i : picker_cursor_;
+        }
+        feedback.play(Cue::modal_open);
+    }
+}
+
+void Dashboard::update_picker(const hui::InputFrame & input, ui::Feedback & feedback) {
+    const auto all = choices_of(settings_, kCategories[setting_category_].rows[setting_row_].id, live_.models, live_.drives);
+    picker_cursor_ = std::clamp(picker_cursor_, 0, std::max(0, (int) all.size() - 1));
+    walk(input, picker_cursor_, (int) all.size(), feedback);
+    if (input.is_pressed(Action::confirm) && !all.empty()) {
+        settings_ = all[(size_t) picker_cursor_].value;
+        request_ = { Request::settings, "" };
+        picker_ = false;
+        feedback.play(Cue::select);
+    } else if (input.is_pressed(Action::back)) {
+        picker_ = false;
+        feedback.play(Cue::modal_close);
     }
 }
 
@@ -877,15 +999,15 @@ void Dashboard::update_logs(const hui::InputFrame & input, ui::Feedback & feedba
         const int next = std::clamp(log_scroll_ + (input.nav == Direction::up ? 3 : -3), 0, most);
         if (next != log_scroll_) {
             log_scroll_ = next;
-            feedback.play(Cue::focus, 1.0f, 0.0f, 0.4f);
+            feedback.play(Cue::focus);
         } else if (!input.nav_repeat) {
-            feedback.play(Cue::error, 1.0f, 0.0f, 0.6f);
+            feedback.play(Cue::error);
         }
     }
     if (input.is_pressed(Action::west)) {
         log_llama_ = !log_llama_;
         log_scroll_ = 0;
-        feedback.play(Cue::select);
+        feedback.play(Cue::tab);
     }
     if (input.is_pressed(Action::north)) {
         log_errors_ = !log_errors_;
@@ -918,6 +1040,7 @@ void Dashboard::draw(DashboardFrame & frame) const {
         case kHomePage: draw_home(scene); break;
         case kModelsPage: draw_models(scene); break;
         case kApiPage: draw_api(scene); break;
+        case kConsolePage: draw_console(scene); break;
         default: draw_settings(scene); break;
     }
     scene.pop_opacity();
@@ -926,6 +1049,13 @@ void Dashboard::draw(DashboardFrame & frame) const {
     draw_dock(scene);
     draw_hints(scene);
     draw_dialogs(frame.overlay);
+    if (picker_ && page_ == kSettingsPage) {
+        draw_picker(frame.overlay);
+    }
+    if (prompt_.visible()) {
+        ui::Canvas canvas{ frame.overlay, fonts_, 0, clock_ };
+        prompt_.draw(canvas);
+    }
     if (busy()) {
         draw_busy(frame.overlay);
     }
@@ -980,12 +1110,20 @@ void Dashboard::draw_hints(gfx::DrawList & l) const {
     layout.cy = 1018;
     layout.item_gap = 36;
     std::vector<ui::Hint> h;
-    if (market_confirm_ || market_space_) {
+    if (market_confirm_ || market_space_ || prompt_.visible()) {
         return;  // the dialog has its own
     }
-    if (page_ == kHomePage) {
-        h = { { ui::Button::l1, "Pages", ui::Button::r1 }, { ui::Button::triangle, "API" },
-              { ui::Button::cross, live_.model_label.empty() ? "Choose a model" : "Change model" } };
+    if (picker_ && page_ == kSettingsPage) {
+        h = { { ui::Button::circle, "Cancel" }, { ui::Button::cross, "Choose" } };
+    } else if (page_ == kHomePage) {
+        h = { { ui::Button::l1, "Pages", ui::Button::r1 } };
+        if (live_.state == ServerState::ready || live_.state == ServerState::generating) {
+            h.push_back({ ui::Button::square, "Demo" });
+            h.push_back({ ui::Button::triangle, "Message" });
+        }
+        h.push_back({ ui::Button::cross, live_.model_label.empty() ? "Choose a model" : "Change model" });
+    } else if (page_ == kConsolePage) {
+        h = { { ui::Button::l1, "Pages", ui::Button::r1 }, { ui::Button::l2, "Range", ui::Button::r2 } };
     } else if (page_ == kModelsPage) {
         if (!in_list_) {
             h = { { ui::Button::dpad, "Choose" }, { ui::Button::cross, "Open" } };
@@ -1028,7 +1166,7 @@ void Dashboard::draw_hints(gfx::DrawList & l) const {
         } else if (is_toggle(id)) {
             h = { { ui::Button::circle, "Back" }, { ui::Button::cross, "Switch" } };
         } else {
-            h = { { ui::Button::circle, "Back" }, { ui::Button::square, "Less" }, { ui::Button::dpad, "More" } };
+            h = { { ui::Button::circle, "Back" }, { ui::Button::cross, "Change" } };
         }
     }
     ui::draw_hints(l, fonts_, style, h.data(), (int) h.size(), kRight, true, layout);
@@ -1145,50 +1283,95 @@ void Dashboard::draw_home(gfx::DrawList & l) const {
         x, p.y + 162, 22, kInk3);
     l.line(x, p.y + 196, x + w, p.y + 196, 1.5f, kHair);
 
-    // The latest requests, newest first: who asked, what, and the answer as it arrives.
-    float y = p.y + 240;
-    const float bottom = p.y + p.h - 72;
-    if (live_.activity.empty()) {
-        put(l, f.regular, "Requests from other devices appear here as they arrive.", x, y + 8, 22, kInk3);
+    // The conversation: what each device asked, on the right as a message
+    // sent, and the model's answer under it on the left, newest at the bottom
+    // as in any chat.
+    struct Turn {
+        const Exchange *         e;
+        std::vector<std::string> asked, answered;
+        float                    h;
+    };
+    const float bubble = w * 0.78f;  // the widest a request's bubble gets
+    const auto clip = [&](std::vector<std::string> & lines, size_t keep, bool tail, float width) {
+        if (lines.size() <= keep) {
+            return;
+        }
+        if (tail) {
+            lines.erase(lines.begin(), lines.end() - (long) keep);  // streaming: the newest lines
+        } else {
+            lines.resize(keep);
+            lines.back() = f.regular.font->fit(lines.back() + " \xE2\x80\xA6", 22, width);
+        }
+    };
+    const float top = p.y + 222, bottom = p.y + p.h - 70;
+    std::vector<Turn> turns;
+    float total = 0;
+    for (auto it = live_.activity.rbegin(); it != live_.activity.rend(); ++it) {
+        const bool newest = it == live_.activity.rbegin();
+        Turn t{ &*it, wrap(f.regular, it->asked.empty() ? std::string(kDash) : it->asked, 22, bubble - 40),
+                wrap(f.regular, it->answered, 22, w), 0 };
+        clip(t.asked, newest ? 3 : 2, false, bubble - 40);
+        clip(t.answered, newest ? 6 : 3, it->status == 0, w);
+        t.h = 26 + (float) t.asked.size() * 30 + 20 + 14 + (float) std::max<size_t>(1, t.answered.size()) * 31 + 34 + 26;
+        total += t.h;
+        turns.push_back(std::move(t));
+        if (total > bottom - top) {
+            break;  // the oldest shown runs off the top, as a chat scrolls
+        }
     }
-    for (auto it = live_.activity.rbegin(); it != live_.activity.rend() && y < bottom - 90; ++it) {
-        const Exchange & e = *it;
+    if (turns.empty()) {
+        put(l, f.regular, "Requests from other devices appear here, as a chat.", x, top + 40, 22, kInk3);
+        if (live_.state == ServerState::ready || live_.state == ServerState::generating) {
+            put(l, f.regular, "Square sends a demo, Triangle a message of your own.", x, top + 76, 22, kInk3);
+        }
+    }
+    float y = bottom - total;
+    for (auto t = turns.rbegin(); t != turns.rend(); ++t) {
+        const Exchange & e = *t->e;
         const bool running = e.status == 0;
         const bool fault = e.status >= 400;
-        put(l, f.regular, e.client + "    " + e.path, x, y, 19, kInk3);
-        if (running) {
-            const float tw = put(l, f.regular, "Answering", x + w, y, 19, kInk2, gfx::Align::right);
-            l.circle(x + w - tw - 14, y - 7, 5, kBlue.with_alpha(0.55f + 0.45f * std::sin(clock_ * 6.0f)));
-        } else {
-            put(l, f.regular, fault ? format("Error %.0f", (double) e.status) : format(e.seconds < 10 ? "%.1f s" : "%.0f s", e.seconds),
-                x + w, y, 19, fault ? kRed : kInk3, gfx::Align::right);
+        const std::string who = e.client.rfind("127.0.0.1", 0) == 0 ? std::string("This PS5") : e.client;
+        if (y >= top) {
+            put(l, f.regular, who + "    " + e.path, x + w, y + 18, 17, kInk3, gfx::Align::right);
         }
-        y += 34;
-        put(l, f.regular, f.regular.font->fit(e.asked.empty() ? std::string(kDash) : e.asked, 22, w), x, y, 22, kInk2);
-        y += 34;
-        // While it streams, the answer's last lines, so it reads as it is
-        // written; once done, its first ones.
-        std::vector<std::string> lines = wrap(f.regular, e.answered, 22, w);
-        const int keep = it == live_.activity.rbegin() ? 3 : 1;
-        if ((int) lines.size() > keep) {
-            if (running) {
-                lines.erase(lines.begin(), lines.end() - keep);
-            } else {
-                lines.resize((size_t) keep);
-                lines.back() = f.regular.font->fit(lines.back() + " \xE2\x80\xA6", 22, w);
+        y += 26;
+        float bw = 0;
+        for (const auto & s : t->asked) {
+            bw = std::max(bw, f.regular.measure(s, 22));
+        }
+        bw += 40;
+        const float bh = (float) t->asked.size() * 30 + 20;
+        if (y >= top) {
+            l.rounded_rect({ x + w - bw, y, bw, bh }, 20, kBlue);
+            for (size_t i = 0; i < t->asked.size(); ++i) {
+                put(l, f.regular, t->asked[i], x + w - bw + 20, y + 32 + 30.0f * (float) i, 22, kInk);
             }
         }
-        if (lines.empty()) {
-            lines.push_back(running ? "" : kDash);
-        }
-        for (const auto & line : lines) {
-            if (y > bottom) {
-                break;
+        y += bh + 14;
+        if (t->answered.empty() && running) {
+            // Nothing yet: three dots, as a chat shows the other side typing.
+            for (int i = 0; i < 3; ++i) {
+                l.circle(x + 8 + 20.0f * (float) i, y + 14, 5, kInk2.with_alpha(0.35f + 0.65f * (0.5f + 0.5f * std::sin(clock_ * 6.0f - (float) i))));
             }
-            put(l, f.regular, line, x, y, 22, fault ? kRed : kInk);
-            y += 31;
         }
-        y += 30;
+        for (size_t i = 0; i < t->answered.size(); ++i) {
+            if (y + 31.0f * (float) i >= top) {
+                put(l, f.regular, t->answered[i], x, y + 22 + 31.0f * (float) i, 22, fault ? kRed : kInk);
+            }
+        }
+        if (t->answered.empty() && !running && y >= top) {
+            put(l, f.regular, kDash, x, y + 22, 22, kInk3);
+        }
+        y += (float) std::max<size_t>(1, t->answered.size()) * 31 + 6;
+        std::string meta = running ? "Answering" : fault ? format("Error %.0f", (double) e.status)
+                                                         : format(e.seconds < 10 ? "%.1f s" : "%.0f s", e.seconds);
+        if (!running && !fault && e.questions > 0) {
+            meta += format(", %.0f ms per decision", 1000.0 * e.seconds / e.questions);
+        }
+        if (y >= top) {
+            put(l, f.regular, meta, x, y + 22, 17, fault ? kRed : kInk3);
+        }
+        y += 28 + 26;
     }
 
     // What it has done since it started, like a trip meter.
@@ -1443,6 +1626,120 @@ void Dashboard::draw_api(gfx::DrawList & l) const {
     put(l, f.mono, decision ? "" : "ANTHROPIC_BASE_URL=" + base, p.x + 218, p.y + p.h - 56, 21, kInk);
 }
 
+// ---- drawing: Console -----------------------------------------------------------------
+
+// Four charts on the left, the instruments' readings now on the right, as a
+// car shows its energy page: the line first, the numbers beside it.
+void Dashboard::draw_console(gfx::DrawList & l) const {
+    const ui::Fonts & f = fonts_;
+    put(l, f.semibold, "Console", kLeft, kTitleY, 44, kInk);
+    const char * ranges[] = { "Last 2 minutes", "Last hour" };
+    float rx = 1224;
+    for (int i = 1; i >= 0; --i) {
+        const bool on = (i == 1) == console_hour_;
+        rx -= f.regular.measure(ranges[i], 22);
+        const float tw = put(l, f.regular, ranges[i], rx, kTitleY - 8, 22, on ? kInk : kInk3);
+        if (on) {
+            l.rounded_rect({ rx, kTitleY + 6, tw, 3 }, 1.5f, kBlue);
+        }
+        rx -= 40;
+    }
+
+    struct Chart {
+        const char *               name;
+        const std::vector<float> & v;
+        const char *               unit;
+        bool                       share;   // 0..1, shown as a percentage
+        bool                       sensor;  // read through ps5-exporter
+    };
+    const bool hour = console_hour_;
+    const Chart charts[] = {
+        { "Temperature", hour ? live_.temp_hour : live_.temp_history, "\xC2\xB0" "C", false, true },
+        { "Power", hour ? live_.power_hour : live_.power_history, " W", false, true },
+        { "GPU", hour ? live_.gpu_hour : live_.gpu_history, "%", true, false },
+        { "CPU", hour ? live_.cpu_hour : live_.cpu_history, "%", true, false },
+    };
+    const float cw = (1224 - kLeft - 32) / 2, ch = (926 - kListY - 32) / 2;
+    for (int i = 0; i < 4; ++i) {
+        const Chart & c = charts[i];
+        const Rect r{ kLeft + (cw + 32) * (float) (i % 2), kListY + (ch + 32) * (float) (i / 2), cw, ch };
+        l.rounded_rect(r, 20, kSurface);
+        put(l, f.regular, c.name, r.x + 32, r.y + 50, 22, kInk2);
+        if (c.v.empty()) {
+            put(l, f.regular, hour ? "The first point comes after 30 seconds" : c.sensor ? "Not read" : kDash, r.x + 32,
+                r.y + r.h * 0.5f + 8, 22, kInk3);
+            if (c.sensor && !hour) {
+                put(l, f.regular, "With elfldr running, the app loads ps5-exporter to read it", r.x + 32, r.y + r.h * 0.5f + 44,
+                    19, kInk3);
+            }
+            continue;
+        }
+        float lo = c.v[0], hi = c.v[0], sum = 0;
+        for (float x : c.v) {
+            lo = std::min(lo, x);
+            hi = std::max(hi, x);
+            sum += x;
+        }
+        const auto show = [&](float x) { return c.share ? format("%.0f%%", 100.0 * x) : format("%.0f", x) + c.unit; };
+        put(l, f.regular, show(c.v.back()), r.x + r.w - 32, r.y + 54, 34, kInk, gfx::Align::right);
+        // The scale: a share runs 0 to 100%; the rest a little past what was seen, in fives.
+        const float pad = std::max(4.0f, (hi - lo) * 0.25f);
+        const float bot = c.share ? 0.0f : std::max(0.0f, std::floor((lo - pad) / 5) * 5);
+        const float top = c.share ? 1.0f : std::ceil((hi + pad) / 5) * 5;
+        const Rect g{ r.x + 100, r.y + 96, r.w - 132, r.h - 96 - 70 };
+        for (int k = 0; k < 3; ++k) {
+            const float gy = g.y + g.h * (float) k * 0.5f;
+            l.line(g.x, gy, g.x + g.w, gy, 1.0f, kHair);
+            put(l, f.regular, show(top - (top - bot) * 0.5f * (float) k), g.x - 14, gy + 6, 16, kInk3, gfx::Align::right);
+        }
+        plot(l, c.v, g, kInk.with_alpha(0.85f), bot, top);
+        put(l, f.regular, "Low " + show(lo) + "    Average " + show(sum / (float) c.v.size()) + "    High " + show(hi),
+            r.x + 32, r.y + r.h - 26, 19, kInk3);
+    }
+
+    // The readings now, as a table.
+    const Rect p{ 1264, kListY, kRight - 1264, 926 - kListY };
+    l.rounded_rect(p, 24, kSurface);
+    put(l, f.regular, "Now", p.x + 40, p.y + 52, 22, kInk2);
+    const auto deg = [&](float t) { return t > -100 ? format("%.0f\xC2\xB0" "C", t) : std::string(kDash); };
+    float soc_lo = 1000, soc_hi = -1000;
+    for (const auto & [name, t] : live_.temps) {
+        if (name.rfind("soc", 0) == 0) {
+            soc_lo = std::min(soc_lo, t);
+            soc_hi = std::max(soc_hi, t);
+        }
+    }
+    std::vector<std::pair<std::string, std::string>> rows = {
+        { "SoC", deg(live_.soc_temp) },
+        { "CPU", deg(live_.cpu_temp) },
+        { "SoC sensors", soc_hi > -100 ? format("%.0f", soc_lo) + " to " + deg(soc_hi) : std::string(kDash) },
+        { "Fan", live_.fan >= 0 ? format("%.0f%%", 100.0 * live_.fan) : std::string(kDash) },
+        { "", "" },
+        { "Power", live_.soc_power_w > 0 ? format("%.0f W", live_.soc_power_w) : std::string(kDash) },
+        { "Energy since start", format("%.1f Wh", live_.energy_wh) },
+        { "CPU clock", live_.cpu_ghz > 0 ? format("%.1f GHz", live_.cpu_ghz) : std::string(kDash) },
+        { "", "" },
+        { "GPU busy", format("%.0f%%", 100.0 * live_.gpu_busy) },
+        { "CPU use", format("%.0f%%", 100.0 * live_.cpu_use) },
+        { "Memory", format("%.1f", live_.pool_gib - live_.free_gib) + " of " + gb(live_.pool_gib) },
+        { "", "" },
+    };
+    for (const auto & d : live_.drives) {
+        rows.push_back({ d.name, d.total > 0 ? format("%.0f", d.free) + " of " + format("%.0f GB free", d.total) : std::string(kDash) });
+    }
+    float y = p.y + 104;
+    for (const auto & [name, value] : rows) {
+        if (name.empty()) {
+            l.line(p.x + 40, y - 14, p.x + p.w - 40, y - 14, 1.0f, kHair);
+            y += 14;
+            continue;
+        }
+        put(l, f.regular, name, p.x + 40, y, 20, kInk2);
+        put(l, f.regular, value, p.x + p.w - 40, y, 20, kInk, gfx::Align::right);
+        y += 38;
+    }
+}
+
 // ---- drawing: Settings ----------------------------------------------------------------
 
 void Dashboard::draw_settings(gfx::DrawList & l) const {
@@ -1474,15 +1771,50 @@ void Dashboard::draw_settings(gfx::DrawList & l) const {
             toggle_switch(l, kRight - 28, cy, toggle_value(settings_, r.id));
         } else if (r.id != Setting::clear_scratch) {
             const bool focus = in_rows_ && i == setting_row_;
-            put(l, f.regular, setting_text(settings_, r.id, live_.models, live_.drives), kRight - 64, y + 50, 24,
-                 focus ? kInk : kInk2, gfx::Align::right);
-            if (focus) {
-                put(l, f.regular, "\xE2\x80\xBA", kRight - 34, y + 50, 30, kInk2);  // a chevron: there is more
-            }
+            const Color c = focus ? kInk : kInk2;
+            put(l, f.regular, setting_text(settings_, r.id, live_.models, live_.drives), kRight - 68, y + 50, 24, c,
+                 gfx::Align::right);
+            // A chevron down: X opens a list of the choices.
+            l.line(kRight - 44, cy - 4, kRight - 36, cy + 4, 2.4f, c);
+            l.line(kRight - 36, cy + 4, kRight - 28, cy - 4, 2.4f, c);
         } else if (live_.scratch_gib > 0) {
             put(l, f.regular, format("%.1f GB in it", live_.scratch_gib), kRight - 28, y + 50, 22, kInk2,
                  gfx::Align::right);
         }
+    }
+}
+
+// A row's choices in a list that drops from it, the one set now ticked.
+void Dashboard::draw_picker(gfx::DrawList & l) const {
+    const ui::Fonts & f = fonts_;
+    const auto all = choices_of(settings_, kCategories[setting_category_].rows[setting_row_].id, live_.models, live_.drives);
+    const int   n = (int) all.size(), shown = std::min(n, 7);
+    const float pitch = 64, w = 700, h = (float) shown * pitch + 24;
+    const float below = kListY + kRowPitch * (float) setting_row_ + kRowH + 8;
+    const Rect  r{ kRight - w, std::min(below, kDockY - 24 - h), w, h };
+    l.shadow({ r.x, r.y + 12, r.w, r.h }, 20, 40, kBlack.with_alpha(0.55f));
+    l.rounded_rect({ r.x - 1.5f, r.y - 1.5f, r.w + 3, r.h + 3 }, 21.5f, kHair);
+    l.rounded_rect(r, 20, kSurface);
+    const int first = std::clamp(picker_cursor_ - shown / 2, 0, std::max(0, n - shown));
+    for (int i = first; i < first + shown; ++i) {
+        const Choice & c = all[(size_t) i];
+        const float y = r.y + 12 + pitch * (float) (i - first);
+        if (i == picker_cursor_) {
+            l.rounded_rect({ r.x + 10, y, r.w - 20, pitch }, 14, kRaised);
+        }
+        put(l, f.regular, f.regular.font->fit(c.label, 24, r.w - 330), r.x + 32, y + 41, 24, kInk);
+        put(l, f.regular, f.regular.font->fit(c.note, 19, 260), r.x + r.w - 76, y + 40, 19, kInk3, gfx::Align::right);
+        if (c.current) {
+            const float cx = r.x + r.w - 46, cy = y + pitch * 0.5f;
+            l.line(cx - 9, cy, cx - 3, cy + 7, 2.6f, kBlue);
+            l.line(cx - 3, cy + 7, cx + 9, cy - 7, 2.6f, kBlue);
+        }
+    }
+    if (n > shown) {
+        // How far down the list is, as a thin bar.
+        const float track = h - 32, thumb = track * (float) shown / (float) n;
+        l.rounded_rect({ r.x + r.w - 8, r.y + 16, 3, track }, 1.5f, kHair);
+        l.rounded_rect({ r.x + r.w - 8, r.y + 16 + (track - thumb) * (float) first / (float) (n - shown), 3, thumb }, 1.5f, kInk3);
     }
 }
 

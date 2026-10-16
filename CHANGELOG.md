@@ -5,7 +5,7 @@ Versions follow [semver](https://semver.org). The app's version is set in
 `v<version>` and ships `ps5lm-app-v<version>.zip` (see `scripts/release-app.sh`).
 v0.1.x are the upstream payload releases by cobanov.
 
-## [Unreleased]
+## [0.9.0] - 2026-10-16
 
 ### Added
 - A new screen, designed from scratch: **Home** (the model, its speed, and every request and its
@@ -33,6 +33,9 @@ v0.1.x are the upstream payload releases by cobanov.
 ### Fixed
 - The app opens on Home, not on the model list, and draws its splash before the GPU opens, so a
   restart for a model no longer shows a black screen.
+- Home shows the load as it happens, how much of the model is on the GPU, instead of a still
+  splash, and offers Demo and Message only once the server answers: requests sent while the model
+  loaded were lost.
 - One sound for each kind of action, at one pitch: no two actions share a sound by accident.
 - A float in any request (`"temperature": 0.7`) stopped the server: the console's `localeconv()`
   reports an empty decimal point. The app now gives the C locale's.
@@ -40,6 +43,10 @@ v0.1.x are the upstream payload releases by cobanov.
   loads the model text only.
 - `scripts/build-app.sh` fetches the OpenGL SDK through ps5-homebrew-ui's script, creates `build/`,
   and no longer needs ImageMagick.
+
+### Known issues
+- A decision model can stop answering after about 55 requests in a row on the console (the server
+  waits on the GPU); restart the app or load the model again. Language models are not affected.
 
 ## [0.8.3] - 2026-10-13
 

@@ -119,7 +119,6 @@ class Dashboard {
     float page_age_ = 10;           // seconds since the page changed
     hui::tween::Spring dock_x_;     // the current tab's marker
     hui::tween::Spring rows_y_;     // the focused row's highlight, on the Models and Settings pages
-    hui::tween::Spring hero_;       // the speed the Home page shows, eased
 
     // Models.
     int   section_ = kLocal;

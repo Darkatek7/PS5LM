@@ -561,9 +561,6 @@ void Dashboard::update(const hui::InputFrame & raw, float dt, ui::Feedback & fee
     rows_y_.update(dt, 22.0f);
     dock_x_.target = (float) page_;
     dock_x_.update(dt, 18.0f);
-    const bool decision = !live_.decision.empty();
-    hero_.target = decision ? live_.prompt_tps : live_.gen_tps;
-    hero_.update(dt, 6.0f);
 }
 
 void Dashboard::update_home(const hui::InputFrame & input, ui::Feedback & feedback) {
@@ -1080,11 +1077,11 @@ void Dashboard::draw_home(gfx::DrawList & l) const {
             big = std::max(0.0f, live_.load_progress) * 100.0f;
             unit = "% on the GPU";
         } else if (decision) {
-            big = hero_.value;
+            big = live_.prompt_tps;  // as measured, once a second: an eased number flickers on a TV
             unit = "tokens read per second";
             known = live_.prompt_tps > 0;
         } else {
-            big = hero_.value;
+            big = live_.gen_tps;
             unit = "tokens per second";
             known = live_.gen_tps > 0;
             if (!known) {

@@ -67,7 +67,7 @@ constexpr float kRailW = 330.0f, kRailPitch = 76.0f, kRailH = 64.0f;
 constexpr float kListX = 486.0f, kListY = 236.0f, kRowPitch = 92.0f, kRowH = 80.0f;
 constexpr int   kVisibleRows = 7;
 constexpr float kTau = 6.2831853f;
-constexpr const char * kDash = "\xE2\x80\x94";
+constexpr const char * kDash = "\xE2\x80\x93";  // an en dash: nothing to show
 
 constexpr const char * kPageNames[Dashboard::kPages] = { "Home", "Models", "API", "Console", "Settings" };
 constexpr const char * kSectionNames[Dashboard::kSections] = { "On this PS5", "Suggested", "Search", "Downloads" };

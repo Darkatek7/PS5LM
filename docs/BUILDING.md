@@ -52,6 +52,14 @@ scripts/build-app.sh        # build/app-ps5/title/PPSA99575
 scripts/release-app.sh      # build/release/ps5lm-app-vX.Y.Z.zip and its .sha256
 ```
 
+BlackBearReloaded's repositories, ps5-homebrew-ui and ps5-opengl, are no longer on GitHub. The
+submodule comes from a mirror at the same commit. `build-app.sh` gets the ps5-opengl SDK through
+ps5-homebrew-ui's `tools/fetch-opengl-sdk.sh`, whose download now fails: put
+`ps5-opengl-sdk-1.0.0.tar.gz` from a mirror (one is
+[here](https://github.com/MyLuxy/overdrive-deps/releases/tag/ps5-opengl-v1.0.0)) in
+`third_party/ps5-homebrew-ui/.deps/ps5-opengl/`, and the script checks it against its pinned
+sha256 before using it.
+
 `make app` builds PS5_Vulkan's host tool and `libc.prx`, which `build-app.sh` uses; its own demo title
 may fail to link at PS5_Vulkan's HEAD, which does not matter here.
 

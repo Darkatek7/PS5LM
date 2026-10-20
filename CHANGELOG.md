@@ -17,8 +17,8 @@ v0.1.x are the upstream payload releases by cobanov.
   The app asks the HEN at every start, the restart for a model included, by writing
   `{"PID":n}` to `/download0/etahen_jailbreak`, which OnionHEN honours for a title on its
   allowlist: add `PPSA99575` to `app_jailbreak.exact_title_ids` in `/data/OnionHEN/config.ini`.
-  If `/data` stays closed, a notification says so and `app.log` says why. From @abhi245y's
-  PS5LM Plus.
+  If `/data` stays closed, a notification on the TV says so and names the OnionHEN setting.
+  From @abhi245y's PS5LM Plus.
 - `/data/PS5LM` is created when it is missing.
 
 ### Changed

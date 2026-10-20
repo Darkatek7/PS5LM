@@ -14,6 +14,7 @@
 
 #include <pthread.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <unistd.h>
@@ -225,6 +226,54 @@ void notify(const char * text) {
     } request = {};
     std::snprintf(request.message, sizeof(request.message), "%s", text);
     sceKernelSendNotificationRequest(0, &request, sizeof(request), 0);
+}
+
+// A title sees only its own /app0 and /download0; /data is the HEN's to open.
+// etaHEN opens it before the title starts; OnionHEN opens it on request,
+// {"PID":n} in /download0/etahen_jailbreak, for a title on its app jailbreak
+// allowlist. Every process asks, since the restart for a model (LoadExec)
+// starts a new one, sandboxed again (#16, #23; from @abhi245y's PS5LM Plus).
+// Open means the models folder lists and a file can be written there.
+bool data_open() {
+    mkdir("/data/PS5LM", 0777);
+    mkdir(kModels, 0777);
+    DIR * d = opendir(kModels);
+    if (!d) {
+        return false;
+    }
+    closedir(d);
+    const int fd = open("/data/PS5LM/.probe", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+        return false;
+    }
+    const bool ok = write(fd, "1", 1) == 1;
+    close(fd);
+    unlink("/data/PS5LM/.probe");
+    return ok;
+}
+
+// How /data ended up, for the log. A refusal is remembered in /download0:
+// the next starts (one per model change) still ask, but wait 2 s, not 10.
+std::string open_data() {
+    constexpr const char * kRefused = "/download0/PS5LM/data-closed";
+    if (data_open()) {
+        unlink(kRefused);
+        return "open";
+    }
+    const int err = errno;
+    const bool again = access(kRefused, F_OK) == 0;
+    std::ofstream("/download0/etahen_jailbreak.tmp") << "{\"PID\":" << getpid() << "}\n";
+    rename("/download0/etahen_jailbreak.tmp", "/download0/etahen_jailbreak");
+    for (int i = 1; i <= (again ? 8 : 40); i++) {  // OnionHEN answered in about 3 s
+        sceKernelUsleep(250000);
+        if (data_open()) {
+            unlink(kRefused);
+            return "opened by the HEN after " + std::to_string(i / 4.0).substr(0, 4) + " s";
+        }
+    }
+    mkdir("/download0/PS5LM", 0777);
+    std::ofstream(kRefused) << "1\n";
+    return std::string("closed (") + strerror(err) + "), the HEN did not open it";
 }
 
 // A quit request from the PC (scripts/ps5lm-app.sh close): the app ends
@@ -567,6 +616,8 @@ bool load_font(hui::gfx::Renderer & renderer, const char * name, hui::gfx::Font 
 }  // namespace
 
 int main(int, char **) {
+    // /data first: the log, the settings and the models live there.
+    const std::string data = open_data();
     // stdout and stderr to a file the PC can fetch over FTP.
     if (std::freopen(kLog, "w", stdout) != nullptr) {
         setvbuf(stdout, nullptr, _IOLBF, 0);
@@ -575,6 +626,11 @@ int main(int, char **) {
         setvbuf(stderr, nullptr, _IONBF, 0);
     }
     std::printf("ps5lm-app: version " PS5LM_VERSION "\n");
+    std::printf("ps5lm-app: /data %s\n", data.c_str());
+    if (data.rfind("closed", 0) == 0) {
+        notify("PS5LM cannot write to /data. On OnionHEN, add PPSA99575 to app_jailbreak.exact_title_ids "
+               "in /data/OnionHEN/config.ini and start PS5LM again.");
+    }
     // One device-local heap over the whole pool (RADV splits an APU's 2/3 to
     // 1/3), and a HOME for llama.cpp, which throws without one.
     setenv("radv_enable_unified_heap_on_apu", "true", 1);

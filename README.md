@@ -108,7 +108,11 @@ You need a PS5 on firmware 7.00 to 13.60, jailbroken, with these payloads loaded
    Anthropic client at it.
 
 To update, copy the new folder over the old one. Settings, models and downloads stay in
-`/data/PS5LM`. Using it from coding tools (opencode, Codex, Claude Code) is in
+`/data/PS5LM`.
+
+If PS5LM cannot write to `/data/PS5LM` ("Cannot write to /data/PS5LM/models"), the HEN has not
+opened the console's storage to it. On OnionHEN, add `PPSA99575` to `exact_title_ids` in the
+`[app_jailbreak]` section of `/data/OnionHEN/config.ini`, then start PS5LM again. Using it from coding tools (opencode, Codex, Claude Code) is in
 [docs/CLI.md](docs/CLI.md).
 
 | Where | Button | Does |

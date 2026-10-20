@@ -5,6 +5,27 @@ Versions follow [semver](https://semver.org). The app's version is set in
 `v<version>` and ships `ps5lm-app-v<version>.zip` (see `scripts/release-app.sh`).
 v0.1.x are the upstream payload releases by cobanov.
 
+## [0.9.1] - 2026-10-20
+
+### Fixed
+- A full log queue no longer stops the server. llama.cpp's log holds 512 lines, and the app's
+  writer prints each one to `app.log` and `llama.log`; when it fell behind, the server thread
+  waited for room, so `/slots` and `/metrics` stopped answering while `/health` still did, the
+  hang in #20. On the console a full queue now drops the line and the writer says how many it
+  dropped (`patches/0008-log-never-blocks.patch`, by @bilawalriaz in #28).
+- Storage on consoles where the HEN does not open `/data` to the app by itself (#16, #23, #24).
+  The app asks the HEN at every start, the restart for a model included, by writing
+  `{"PID":n}` to `/download0/etahen_jailbreak`, which OnionHEN honours for a title on its
+  allowlist: add `PPSA99575` to `app_jailbreak.exact_title_ids` in `/data/OnionHEN/config.ini`.
+  If `/data` stays closed, a notification says so and `app.log` says why. From @abhi245y's
+  PS5LM Plus.
+- `/data/PS5LM` is created when it is missing.
+
+### Changed
+- ps5-homebrew-ui and ps5-opengl are gone from GitHub: the submodule now comes from a mirror at
+  the same pinned commit, and [docs/BUILDING.md](docs/BUILDING.md) says where the ps5-opengl SDK
+  archive is still found.
+
 ## [0.9.0] - 2026-10-16
 
 ### Added

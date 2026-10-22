@@ -110,9 +110,12 @@ You need a PS5 on firmware 7.00 to 13.60, jailbroken, with these payloads loaded
 To update, copy the new folder over the old one. Settings, models and downloads stay in
 `/data/PS5LM`.
 
-If PS5LM cannot write to `/data/PS5LM` ("Cannot write to /data/PS5LM/models"), the HEN has not
-opened the console's storage to it. On OnionHEN, add `PPSA99575` to `exact_title_ids` in the
-`[app_jailbreak]` section of `/data/OnionHEN/config.ini`, then start PS5LM again.
+If the HEN has not opened the console's storage (`/data`) to PS5LM, the app says so on its first
+start and offers its own storage instead: up to 16 GB in `/download0/PS5LM`, for its settings, logs
+and models (a download that does not fit is refused before it starts). To open full storage on
+OnionHEN, add `PPSA99575` to `exact_title_ids` in the `[app_jailbreak]` section of
+`/data/OnionHEN/config.ini`, then start PS5LM again; models saved in the app's storage stay in the
+library. **Settings > Sound and storage** shows which one is in use.
 
 When something goes wrong, **Settings > Debug report** writes `/data/PS5LM/debug-report.txt` (and a copy
 to a USB drive, when one is in): the app's version, the system software, storage, models, settings, the

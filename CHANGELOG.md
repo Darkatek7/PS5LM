@@ -16,8 +16,22 @@ v0.1.x are the upstream payload releases by cobanov.
   tokens and passwords are taken out of everything in it. The kernel log goes in only when
   **Include the kernel log** is on (off by default), at most its last 1 MiB, read from klogsrv
   or etaHEN's. Before the first report a dialog says what it holds.
+- **The app's own storage** when the HEN keeps `/data` closed (#16, #23, #24). The app used to
+  stop there: no log, no settings, every download failing. It now keeps its files in
+  `/download0/PS5LM` instead, and on the first such start asks, over the screen: use the app's
+  storage, or how to open full storage (OnionHEN's `exact_title_ids`, etaHEN, other HENs) and start
+  again, which asks the HEN once more. **Settings > Sound and storage > Where PS5LM keeps its
+  files** shows which one is in use and how full it is. Models saved there stay in the library
+  once full storage opens.
 
 ### Changed
+- `downloadDataSize` in `sce_sys/param.json` is 16 GiB (16384 MiB, was 256 MiB): the size of
+  the app's own storage. The app counts what it holds itself, as a title's `statvfs` is a stub.
+  Whether the system sets the whole 16 GiB aside on internal storage at the first start, or
+  only what is written, is not known yet; lowering it later frees nothing.
+- A download is refused before it starts, with the reason on the TV, when the drive has no room
+  for it, the downloads already queued to that drive, and 1 GiB to spare. A model and its image
+  projector are queued together or not at all.
 - More memory for models, expected about 0.56 GiB: `sce_sys/param.json` no longer declares the
   `amm` block and the 256 MiB CPU and GPU page tables it carried over from ps5-homebrew-ui's
   template. With them the system gave the app 11.44 GiB of direct memory (the 12,280,922,112 bytes
@@ -26,6 +40,10 @@ v0.1.x are the upstream payload releases by cobanov.
   so every model's plan grows with it. Not yet measured on a console: `app.log` now records the pool
   and the flexible memory at start (`memory at start`) and once the model serves (`memory when
   ready`).
+
+### Fixed
+- A download that meets a full drive anyway stops at once, "Failed: App storage is full", instead
+  of retrying twenty times.
 
 ## [0.9.1] - 2026-10-20
 

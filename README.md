@@ -112,7 +112,14 @@ To update, copy the new folder over the old one. Settings, models and downloads 
 
 If PS5LM cannot write to `/data/PS5LM` ("Cannot write to /data/PS5LM/models"), the HEN has not
 opened the console's storage to it. On OnionHEN, add `PPSA99575` to `exact_title_ids` in the
-`[app_jailbreak]` section of `/data/OnionHEN/config.ini`, then start PS5LM again. Using it from coding tools (opencode, Codex, Claude Code) is in
+`[app_jailbreak]` section of `/data/OnionHEN/config.ini`, then start PS5LM again.
+
+When something goes wrong, **Settings > Debug report** writes `/data/PS5LM/debug-report.txt` (and a copy
+to a USB drive, when one is in): the app's version, the system software, storage, models, settings, the
+end of both logs and which payload ports answer, with API keys and tokens taken out. Attach it to your
+[issue](https://github.com/cobanov/PS5LM/issues). The kernel log goes in only if you switch it on there.
+
+Using it from coding tools (opencode, Codex, Claude Code) is in
 [docs/CLI.md](docs/CLI.md).
 
 | Where | Button | Does |
@@ -126,6 +133,7 @@ opened the console's storage to it. On OnionHEN, add `PPSA99575` to `exact_title
 | Console | L2 / R2 | the last two minutes / the last hour |
 | Settings | D-pad, Cross | choose a category and a row; flip it, or pick from its list |
 | Settings, Diagnostics | Square, Triangle | app or server log; errors only |
+| Settings, Debug report | Cross | write one file to attach to an issue |
 
 ## Want to tinker?
 

@@ -7,6 +7,16 @@ v0.1.x are the upstream payload releases by cobanov.
 
 ## [Unreleased]
 
+### Added
+- **Settings > Debug report**: one file to attach to a GitHub issue, `/data/PS5LM/debug-report.txt`
+  and a copy on a USB drive when one is in. It holds the app's version, the system software, where
+  the app keeps its files and the room on each drive, the models and their plans, the downloads,
+  the settings, `env.txt` and `app-args.txt`, the last 256 KiB of `app.log` and `llama.log`, and
+  which payload ports answer (ELF loader, FTP, kernel log, shell, ps5-exporter, ...). API keys,
+  tokens and passwords are taken out of everything in it. The kernel log goes in only when
+  **Include the kernel log** is on (off by default), at most its last 1 MiB, read from klogsrv
+  or etaHEN's. Before the first report a dialog says what it holds.
+
 ### Changed
 - More memory for models, expected about 0.56 GiB: `sce_sys/param.json` no longer declares the
   `amm` block and the 256 MiB CPU and GPU page tables it carried over from ps5-homebrew-ui's

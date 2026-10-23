@@ -136,6 +136,12 @@ ggml-vulkan on [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan)'s RADV, bui
 [Research](docs/RESEARCH.md) · [Models that fit](docs/MODELS.md) · [Roadmap](docs/ROADMAP.md) ·
 [Changelog](CHANGELOG.md) · [The original payload](docs/PAYLOAD.md)
 
+## Built around it
+
+- [ps5lm_ha](https://github.com/phoinixgrr/ps5lm_ha) by [phoinixgrr](https://github.com/phoinixgrr):
+  a Home Assistant integration that wakes the console from rest mode, starts PS5LM, waits for the
+  model and puts the console back to sleep when done, with the model and console readings as sensors.
+
 ## Thanks
 
 - [abhi245y](https://github.com/abhi245y), who built the native GPU app this one grew from (PS5LM Plus).

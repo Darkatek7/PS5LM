@@ -29,6 +29,10 @@ llama_revision=$(git ls-tree HEAD third_party/llama.cpp | awk '{print $3}')
 [[ -f "$llama/CMakeLists.txt" && $(git -C "$llama" rev-parse HEAD) == "$llama_revision" ]] || {
     echo 'title-check: initialize the pinned llama.cpp submodule first' >&2; exit 2;
 }
+ftpsrv_revision=$(git ls-tree HEAD third_party/ftpsrv | awk '{print $3}')
+[[ -f "$root/third_party/ftpsrv/Makefile.ps5" && $(git -C "$root/third_party/ftpsrv" rev-parse HEAD) == "$ftpsrv_revision" ]] || {
+    echo 'title-check: initialize the pinned ftpsrv submodule first' >&2; exit 2;
+}
 vk="$PS5LM_NATIVE_SOURCES/PS5_Vulkan"
 sdk_fork="$PS5LM_NATIVE_SOURCES/PS5_PayloadSDK"
 vk_revision=f410e67a0241b3e8edcdbcd2a9b285dfc4a412ed
@@ -130,7 +134,7 @@ from pathlib import Path
 import sys
 
 output, app = map(Path, sys.argv[1:3])
-files = ('eboot.bin', 'sce_module/libc.prx', 'sce_sys/param.json', 'sce_sys/icon0.png', 'sce_sys/pic0.dds', 'sce_sys/pic1.dds')
+files = ('eboot.bin', 'payloads/ps5lm-ftpsrv.elf', 'sce_module/libc.prx', 'sce_sys/param.json', 'sce_sys/icon0.png', 'sce_sys/pic0.dds', 'sce_sys/pic1.dds')
 result = {
     'status': 'passed',
     'scope': 'Complete native title cross-build and static ELF/FSELF validation; NOT console/Vulkan execution',

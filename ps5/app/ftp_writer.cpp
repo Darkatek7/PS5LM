@@ -126,7 +126,23 @@ bool FtpWriter::reply(int & code, std::string & text, std::string & error) {
     }
 }
 
+namespace {
+// A path comes from a Hugging Face repo, and a git path may hold a line break:
+// "x\r\nDELE ..." would be a second command to a payload that can write
+// anywhere on the console.
+bool refuse_line_break(const std::string & text, std::string & error) {
+    if (text.find_first_of(std::string("\r\n\0", 3)) == std::string::npos) {
+        return false;
+    }
+    error = "ftpsrv: refused a path with a line break in it";
+    return true;
+}
+}  // namespace
+
 bool FtpWriter::command(const std::string & line, int & code, std::string & text, std::string & error) {
+    if (refuse_line_break(line, error)) {
+        return false;
+    }
     if (!send_all(ctrl_, (line + "\r\n").data(), line.size() + 2, error)) {
         error = "ftpsrv: " + error;
         return false;
@@ -284,7 +300,7 @@ bool FtpWriter::end(std::string & error) {
 
 bool FtpWriter::write_at(const std::string & path, uint64_t offset, const char * data, size_t n,
                          std::string & error) {
-    return begin(path, offset, error) && send(data, n, error) && end(error);
+    return !refuse_line_break(path, error) && begin(path, offset, error) && send(data, n, error) && end(error);
 }
 
 bool FtpWriter::rename(const std::string & from, const std::string & to, std::string & error) {
@@ -305,7 +321,7 @@ bool FtpWriter::rename(const std::string & from, const std::string & to, std::st
 }
 
 bool FtpWriter::size(const std::string & path, uint64_t & out, std::string & error) {
-    if (!connect(error)) {
+    if (refuse_line_break(path, error) || !connect(error)) {
         return false;
     }
     int         code = 0;

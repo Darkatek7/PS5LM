@@ -19,6 +19,9 @@ export LLVM_CONFIG="$llvm_config"
 for tool in git clang clang++ make wget unzip sha256sum timeout python3 cmake ninja meson rsync glslangValidator glslc pkg-config curl ffmpeg; do
     command -v "$tool" >/dev/null || { echo "title-check: missing $tool" >&2; exit 2; }
 done
+# Host check, no console or server: FtpWriter refuses a path with a line break.
+clang++ -std=c++17 -O1 ps5/app/ftp_writer_test.cpp ps5/app/ftp_writer.cpp -o "$output/tools/ftp_writer_test"
+"$output/tools/ftp_writer_test"
 ui="$root/third_party/ps5-homebrew-ui"
 ui_revision=$(git ls-tree HEAD third_party/ps5-homebrew-ui | awk '{print $3}')
 [[ -f "$ui/tools/fetch-opengl-sdk.sh" && $(git -C "$ui" rev-parse HEAD) == "$ui_revision" ]] || {
